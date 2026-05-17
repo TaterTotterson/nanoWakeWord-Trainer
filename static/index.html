@@ -136,22 +136,22 @@
     <div class="grid two">
       <section class="card">
         <h3>Training Job</h3>
-        <p>Defaults are intentionally modest for early experiments. Increase steps and sample counts after the pipeline is proven.</p>
+        <p>Set the wake phrase and training size, then start a new model run.</p>
         <div class="form">
           <label class="wide">Wake Phrase
             <input id="phrase" type="text" value="hey tater">
           </label>
           <label>Steps
-            <input id="steps" type="number" min="100" step="100" value="20000">
+            <input id="steps" type="number" min="100" step="100" value="50000">
           </label>
           <label>Positive Samples
-            <input id="positiveSamples" type="number" min="0" step="100" value="2000">
+            <input id="positiveSamples" type="number" min="0" step="100" value="2500">
           </label>
           <label>Negative Samples
-            <input id="negativeSamples" type="number" min="0" step="100" value="2000">
+            <input id="negativeSamples" type="number" min="0" step="100" value="5000">
           </label>
           <label>Validation Samples
-            <input id="validationSamples" type="number" min="0" step="50" value="400">
+            <input id="validationSamples" type="number" min="0" step="50" value="2000">
           </label>
           <label>Model Type
             <select id="modelType">
@@ -164,7 +164,7 @@
             <input id="layerSize" type="number" min="8" step="8" value="32">
           </label>
           <label>Workers
-            <input id="numWorkers" type="number" min="0" step="1" value="4">
+            <input id="numWorkers" type="number" min="0" step="1" value="0">
           </label>
           <label>Target FP/hour
             <input id="targetFp" type="number" min="0" step="0.1" value="0.5">
@@ -326,13 +326,13 @@
     $("trainBtn").addEventListener("click", async () => {
       const body = {
         phrase: $("phrase").value.trim(),
-        steps: Number($("steps").value || 20000),
-        positive_samples: Number($("positiveSamples").value || 2000),
-        negative_samples: Number($("negativeSamples").value || 2000),
-        validation_samples: Number($("validationSamples").value || 400),
+        steps: Number($("steps").value || 50000),
+        positive_samples: Number($("positiveSamples").value || 2500),
+        negative_samples: Number($("negativeSamples").value || 5000),
+        validation_samples: Number($("validationSamples").value || 2000),
         model_type: $("modelType").value,
         layer_size: Number($("layerSize").value || 32),
-        num_workers: Number($("numWorkers").value || 4),
+        num_workers: Number($("numWorkers").value || 0),
         target_fp_per_hour: Number($("targetFp").value || 0.5),
         overwrite: $("overwriteFeatures").checked,
         custom_negative_phrases: $("negativePhrases").value.split(/\n+/).map((s) => s.trim()).filter(Boolean),

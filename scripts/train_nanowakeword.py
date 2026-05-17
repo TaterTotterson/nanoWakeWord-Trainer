@@ -17,6 +17,18 @@ import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MODEL_SUFFIXES = {".onnx", ".pt", ".pth"}
+DEFAULT_POSITIVE_SAMPLES = 2500
+DEFAULT_NEGATIVE_SAMPLES = 5000
+DEFAULT_VALIDATION_SAMPLES = 2000
+DEFAULT_HARD_NEGATIVE_SAMPLES = 3000
+DEFAULT_STEPS = 50000
+DEFAULT_NUM_WORKERS = 0
+
+FEATURE_BANKS = {
+    "AE29H_float32.npy": ("ae", 100),
+    "RACON_11h_v1.npy": ("b", 90),
+    "openwakeword_features_ACAV100M_2000_hrs_16bit.npy": ("oww", 1000),
+}
 
 
 def log(message: str) -> None:
@@ -37,6 +49,19 @@ def existing_wavs(path: Path) -> list[Path]:
     return sorted(item for item in path.glob("*.wav") if item.is_file())
 
 
+def feature_bank_dir(output_dir: Path) -> Path:
+    return Path(os.environ.get("NWW_FEATURE_BANK_DIR", str(output_dir.parent / "feature_banks"))).resolve()
+
+
+def add_feature_bank_negatives(config: dict[str, Any], bank_dir: Path) -> None:
+    for filename, (key, batch_weight) in FEATURE_BANKS.items():
+        path = (bank_dir / filename).resolve()
+        if not path.exists():
+            continue
+        config.setdefault("feature_manifest", {}).setdefault("negatives", {})[key] = str(path)
+        config.setdefault("batch_composition", {})[key] = batch_weight
+
+
 def nanowakeword_cmd() -> list[str]:
     exe = shutil.which("nanowakeword")
     if exe:
@@ -53,18 +78,21 @@ def add_feature_task(
     feature_file: str,
     split: str,
     require_existing: bool = True,
+    augmentation_rounds: int = 10,
+    batch_weight: int | None = None,
+    use_rir: bool = False,
 ) -> None:
     if require_existing and not existing_wavs(source_dir):
         return
     feature_path = Path(config["output_dir"]) / config["model_name"] / "features" / feature_file
     has_backgrounds = bool(config.get("background_paths"))
-    has_rirs = bool(config.get("rir_paths"))
+    has_rirs = bool(config.get("rir_paths")) and use_rir
     config.setdefault("feature_generation_manifest", {})[label] = {
         "input_audio_dirs": [str(source_dir)],
         "output_filename": feature_file,
         "use_background_noise": has_backgrounds,
         "use_rir": has_rirs,
-        "augmentation_rounds": 1,
+        "augmentation_rounds": augmentation_rounds,
     }
     manifest_keys = {
         "target": "targets",
@@ -77,7 +105,9 @@ def add_feature_task(
         raise ValueError(f"Unknown feature split: {split}")
     config.setdefault("feature_manifest", {}).setdefault(manifest_key, {})[key] = str(feature_path)
     if split in {"target", "negative"}:
-        config.setdefault("batch_composition", {})[key] = 32 if split == "target" else 64
+        if batch_weight is None:
+            batch_weight = 100
+        config.setdefault("batch_composition", {})[key] = batch_weight
 
 
 def negative_text_source(args: argparse.Namespace, samples: int) -> dict[str, Any]:
@@ -91,7 +121,18 @@ def negative_text_source(args: argparse.Namespace, samples: int) -> dict[str, An
     return {
         "type": "auto_adversarial",
         "base_phrase": args.phrase,
+        "include_input_words": True,
         "include_partial_phrase": True,
+        "multi_word_prob": 0.5,
+        "max_multi_word_len": 3,
+    }
+
+
+def phoneme_negative_text_source(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "type": "phoneme_adversarial",
+        "base_phrase": args.phrase,
+        "min_distance": 0.3,
     }
 
 
@@ -108,6 +149,12 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
     validation_negative_generated = generated_dir / "validation_negative"
     background_paths = [str(background_dir)] if existing_wavs(background_dir) else []
     rir_paths = [str(rir_dir)] if existing_wavs(rir_dir) else []
+    hard_negative_generated = generated_dir / "negative_phoneme"
+    hard_negative_samples = (
+        min(DEFAULT_HARD_NEGATIVE_SAMPLES, max(0, int(args.negative_samples * 0.6)))
+        if args.negative_samples > 0
+        else 0
+    )
 
     config: dict[str, Any] = {
         "model_name": model_name,
@@ -117,12 +164,33 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         "negative_data_path": str(negative_generated if args.negative_samples > 0 else negative_dir),
         "model_type": args.model_type,
         "layer_size": args.layer_size,
+        "n_blocks": 3,
+        "embedding_dim": 128,
+        "dropout_prob": 0.3,
+        "activation_function": "relu",
+        "margin_pos": 2.0,
+        "margin_neg": -2.0,
+        "LOSS_BIAS": 0.65,
+        "logit_reg_weight": 0.0005,
+        "logit_reg_margin": 4.0,
+        "logit_min_margin": 1.5,
         "steps": args.steps,
+        "stabilization_steps": max(1, min(20000, max(1000, args.steps // 2), max(1, args.steps - 1))),
         "num_workers": args.num_workers,
+        "optimizer_type": "adamw",
+        "learning_rate_max": 0.0008,
+        "lr_scheduler_type": "onecycle",
+        "weight_decay": 0.01,
+        "momentum": 0.9,
         "target_accuracy": args.target_accuracy,
         "target_recall": args.target_recall,
         "target_false_positives_per_hour": args.target_fp_per_hour,
-        "generate_clips": args.positive_samples > 0 or args.negative_samples > 0 or args.validation_samples > 0,
+        "generate_clips": (
+            args.positive_samples > 0
+            or args.negative_samples > 0
+            or args.validation_samples > 0
+            or hard_negative_samples > 0
+        ),
         "transform_clips": True,
         "train_model": True,
         "distill": False,
@@ -135,7 +203,43 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         "feature_generation_manifest": {},
         "background_paths": background_paths,
         "rir_paths": rir_paths,
+        "background_paths_duplication_rate": [1] if background_paths else [],
+        "augmentation_batch_size": 16,
+        "feature_gen_cpu_ratio": 1.0,
+        "augmentation_settings": {
+            "gain_prob": 1.0,
+            "max_gain_in_db": 2.0,
+            "max_pitch_semitones": 1.0,
+            "max_snr_in_db": 35.0,
+            "min_gain_in_db": -2.0,
+            "min_pitch_semitones": -1.0,
+            "min_snr_in_db": 15.0,
+            "pitch_prob": 0.3,
+            "rir_prob": 0.0,
+        },
+        "val_miss_weight": 4.0,
+        "val_fp_weight": 1.0,
+        "validation_batch_size": 256,
+        "validation_smoothing_window": 3,
+        "val_early_stopping_patience": 6000,
+        "hardness_ema_alpha": 0.05,
+        "hardness_floor": 0.05,
+        "hardness_reset_interval": 5000,
+        "hardness_reset_decay": 0.5,
+        "checkpoint_averaging_top_k": 5,
+        "checkpointing": {
+            "enabled": True,
+            "interval_steps": 1000,
+            "limit": 2,
+        },
+        "early_stopping_patience": 0,
+        "min_delta": 0.0001,
+        "ema_alpha": 0.01,
+        "onnx_opset_version": 17,
+        "hard_negative_samples": hard_negative_samples,
     }
+
+    add_feature_bank_negatives(config, feature_bank_dir(output_dir))
 
     if args.positive_samples > 0:
         config["data_generation_tasks"].append(
@@ -159,6 +263,8 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             feature_file="synthetic_positive_features.npy",
             split="target",
             require_existing=False,
+            augmentation_rounds=10,
+            batch_weight=100,
         )
 
     if args.validation_samples > 0:
@@ -183,6 +289,7 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             feature_file="synthetic_validation_positive_features.npy",
             split="target_val",
             require_existing=False,
+            augmentation_rounds=10,
         )
         config["data_generation_tasks"].append(
             {
@@ -202,6 +309,7 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             feature_file="synthetic_validation_negative_features.npy",
             split="negative_val",
             require_existing=False,
+            augmentation_rounds=10,
         )
 
     if existing_wavs(positive_dir):
@@ -212,6 +320,8 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             source_dir=positive_dir,
             feature_file="personal_positive_features.npy",
             split="target",
+            augmentation_rounds=10,
+            batch_weight=100,
         )
 
     if args.negative_samples > 0:
@@ -233,6 +343,31 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             feature_file="synthetic_negative_features.npy",
             split="negative",
             require_existing=False,
+            augmentation_rounds=10,
+            batch_weight=100,
+        )
+
+    if hard_negative_samples > 0:
+        config["data_generation_tasks"].append(
+            {
+                "name": "synthetic_phoneme_hard_negative",
+                "enabled": True,
+                "output_dir": str(hard_negative_generated),
+                "num_samples": hard_negative_samples,
+                "file_prefix": "neg_ph",
+                "text_source": phoneme_negative_text_source(args),
+            }
+        )
+        add_feature_task(
+            config,
+            key="hn",
+            label="synthetic_phoneme_hard_negative_features",
+            source_dir=hard_negative_generated,
+            feature_file="synthetic_phoneme_hard_negative_features.npy",
+            split="negative",
+            require_existing=False,
+            augmentation_rounds=1,
+            batch_weight=20,
         )
 
     if existing_wavs(negative_dir):
@@ -243,6 +378,8 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             source_dir=negative_dir,
             feature_file="personal_negative_features.npy",
             split="negative",
+            augmentation_rounds=10,
+            batch_weight=100,
         )
 
     if not config["feature_manifest"]["targets"]:
@@ -364,11 +501,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negative-dir", default=os.environ.get("NWW_NEGATIVE_DIR", str(ROOT_DIR / "negative_samples")))
     parser.add_argument("--background-dir", default=os.environ.get("NWW_BACKGROUND_DIR", str(ROOT_DIR / "background_samples")))
     parser.add_argument("--rir-dir", default=os.environ.get("NWW_RIR_DIR", str(ROOT_DIR / "rir_samples")))
-    parser.add_argument("--positive-samples", type=int, default=2000)
-    parser.add_argument("--negative-samples", type=int, default=2000)
-    parser.add_argument("--validation-samples", type=int, default=400)
-    parser.add_argument("--steps", type=int, default=20000)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--positive-samples", type=int, default=DEFAULT_POSITIVE_SAMPLES)
+    parser.add_argument("--negative-samples", type=int, default=DEFAULT_NEGATIVE_SAMPLES)
+    parser.add_argument("--validation-samples", type=int, default=DEFAULT_VALIDATION_SAMPLES)
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS)
     parser.add_argument("--model-type", default="dnn")
     parser.add_argument("--layer-size", type=int, default=32)
     parser.add_argument("--target-accuracy", type=float, default=0.95)
@@ -398,6 +535,8 @@ def main() -> int:
         "config": str(config_path),
         "model_type": args.model_type,
         "steps": args.steps,
+        "hard_negative_samples": config.get("hard_negative_samples", 0),
+        "feature_bank_dir": str(feature_bank_dir(output_root)),
     }
     (model_output_dir / f"{model_name}.metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 

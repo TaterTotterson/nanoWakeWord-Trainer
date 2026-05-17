@@ -28,6 +28,7 @@ PERSONAL_DIR = Path(os.environ.get("NWW_PERSONAL_DIR", str(DATA_DIR / "personal_
 NEGATIVE_DIR = Path(os.environ.get("NWW_NEGATIVE_DIR", str(DATA_DIR / "negative_samples"))).resolve()
 BACKGROUND_DIR = Path(os.environ.get("NWW_BACKGROUND_DIR", str(DATA_DIR / "background_samples"))).resolve()
 RIR_DIR = Path(os.environ.get("NWW_RIR_DIR", str(DATA_DIR / "rir_samples"))).resolve()
+FEATURE_BANK_DIR = Path(os.environ.get("NWW_FEATURE_BANK_DIR", str(DATA_DIR / "feature_banks"))).resolve()
 CAPTURED_DIR = Path(os.environ.get("NWW_CAPTURED_DIR", str(DATA_DIR / "captured_audio"))).resolve()
 TRAINED_DIR = Path(
     os.environ.get("NWW_TRAINED_DIR", os.environ.get("NWW_EXPORT_DIR", str(DATA_DIR / "trained_wake_words")))
@@ -40,8 +41,13 @@ TARGET_CHANNELS = 1
 TARGET_SAMPLE_WIDTH = 2
 MAX_LOG_LINES = int(os.environ.get("NWW_MAX_LOG_LINES", "1200"))
 MODEL_SUFFIXES = {".onnx", ".pt", ".pth"}
+DEFAULT_POSITIVE_SAMPLES = 2500
+DEFAULT_NEGATIVE_SAMPLES = 5000
+DEFAULT_VALIDATION_SAMPLES = 2000
+DEFAULT_STEPS = 50000
+DEFAULT_NUM_WORKERS = 0
 
-for directory in (STATIC_DIR, PERSONAL_DIR, NEGATIVE_DIR, BACKGROUND_DIR, RIR_DIR, CAPTURED_DIR, TRAINED_DIR, LOG_DIR):
+for directory in (STATIC_DIR, PERSONAL_DIR, NEGATIVE_DIR, BACKGROUND_DIR, RIR_DIR, FEATURE_BANK_DIR, CAPTURED_DIR, TRAINED_DIR, LOG_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="NanoWakeWord Trainer")
@@ -126,6 +132,20 @@ def _list_artifacts() -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
+    value = payload.get(key)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
+    value = payload.get(key)
+    if value is None or value == "":
+        return default
+    return float(value)
 
 
 def _is_target_wav(path: Path) -> bool:
@@ -273,11 +293,11 @@ def status() -> JSONResponse:
             },
             "artifacts": _list_artifacts(),
             "defaults": {
-                "positive_samples": int(os.environ.get("NWW_DEFAULT_POSITIVE_SAMPLES", "2000")),
-                "negative_samples": int(os.environ.get("NWW_DEFAULT_NEGATIVE_SAMPLES", "2000")),
-                "validation_samples": int(os.environ.get("NWW_DEFAULT_VALIDATION_SAMPLES", "400")),
-                "steps": int(os.environ.get("NWW_DEFAULT_STEPS", "20000")),
-                "num_workers": int(os.environ.get("NWW_DEFAULT_NUM_WORKERS", "4")),
+                "positive_samples": int(os.environ.get("NWW_DEFAULT_POSITIVE_SAMPLES", str(DEFAULT_POSITIVE_SAMPLES))),
+                "negative_samples": int(os.environ.get("NWW_DEFAULT_NEGATIVE_SAMPLES", str(DEFAULT_NEGATIVE_SAMPLES))),
+                "validation_samples": int(os.environ.get("NWW_DEFAULT_VALIDATION_SAMPLES", str(DEFAULT_VALIDATION_SAMPLES))),
+                "steps": int(os.environ.get("NWW_DEFAULT_STEPS", str(DEFAULT_STEPS))),
+                "num_workers": int(os.environ.get("NWW_DEFAULT_NUM_WORKERS", str(DEFAULT_NUM_WORKERS))),
             },
         }
     )
@@ -371,21 +391,21 @@ async def start_training(request: Request) -> JSONResponse:
         str(TRAIN_SCRIPT),
         phrase,
         "--positive-samples",
-        str(int(payload.get("positive_samples") or 2000)),
+        str(_payload_int(payload, "positive_samples", DEFAULT_POSITIVE_SAMPLES)),
         "--negative-samples",
-        str(int(payload.get("negative_samples") or 2000)),
+        str(_payload_int(payload, "negative_samples", DEFAULT_NEGATIVE_SAMPLES)),
         "--validation-samples",
-        str(int(payload.get("validation_samples") or 400)),
+        str(_payload_int(payload, "validation_samples", DEFAULT_VALIDATION_SAMPLES)),
         "--steps",
-        str(int(payload.get("steps") or 20000)),
+        str(_payload_int(payload, "steps", DEFAULT_STEPS)),
         "--num-workers",
-        str(int(payload.get("num_workers") or 4)),
+        str(_payload_int(payload, "num_workers", DEFAULT_NUM_WORKERS)),
         "--model-type",
         str(payload.get("model_type") or "dnn"),
         "--layer-size",
-        str(int(payload.get("layer_size") or 32)),
+        str(_payload_int(payload, "layer_size", 32)),
         "--target-fp-per-hour",
-        str(float(payload.get("target_fp_per_hour") or 0.5)),
+        str(_payload_float(payload, "target_fp_per_hour", 0.5)),
     ]
     if bool(payload.get("overwrite")):
         cmd.append("--overwrite")

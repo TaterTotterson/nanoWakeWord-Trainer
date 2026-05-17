@@ -10,13 +10,13 @@ Usage:
   ./train_nanowakeword.sh "hey tater" [options]
 
 Options are passed through to scripts/train_nanowakeword.py:
-  --steps 20000
-  --positive-samples 2000
-  --negative-samples 2000
-  --validation-samples 400
+  --steps 50000
+  --positive-samples 2500
+  --negative-samples 5000
+  --validation-samples 2000
   --model-type dnn|lstm|tc-resnet
   --layer-size 32
-  --num-workers 4
+  --num-workers 0
   --custom-negative-phrase "phrase"
   --overwrite
 
@@ -25,6 +25,7 @@ Environment:
   NWW_TORCH_CUDA=cu124               install CUDA PyTorch wheels before training
   NWW_FORCE_CPU=1                    disable CUDA PyTorch wheel install
   NWW_PYTHON_BIN=/path/to/python3.11  override Python
+  NWW_FEATURE_BANK_DIR=/data/feature_banks
 EOF
   exit 1
 fi
@@ -36,6 +37,7 @@ POSITIVE_DIR="${NWW_PERSONAL_DIR:-$DATA_ROOT/personal_samples}"
 NEGATIVE_DIR="${NWW_NEGATIVE_DIR:-$DATA_ROOT/negative_samples}"
 BACKGROUND_DIR="${NWW_BACKGROUND_DIR:-$DATA_ROOT/background_samples}"
 RIR_DIR="${NWW_RIR_DIR:-$DATA_ROOT/rir_samples}"
+FEATURE_BANK_DIR="${NWW_FEATURE_BANK_DIR:-$DATA_ROOT/feature_banks}"
 VENV_DIR="${NWW_VENV_DIR:-$DATA_ROOT/.venv}"
 
 if [[ -n "${NWW_PYTHON_BIN:-}" ]]; then
@@ -56,7 +58,7 @@ if [[ -n "${NWW_TORCH_CUDA:-}" && "${NWW_FORCE_CPU:-0}" != "1" ]]; then
   TRAIN_DEPS_KEY="${NWW_TORCH_VERSION:-2.6.0}+${NWW_TORCH_CUDA}"
 fi
 
-mkdir -p "$OUTPUT_ROOT" "$EXPORT_DIR" "$POSITIVE_DIR" "$NEGATIVE_DIR" "$BACKGROUND_DIR" "$RIR_DIR" "$DATA_ROOT/logs"
+mkdir -p "$OUTPUT_ROOT" "$EXPORT_DIR" "$POSITIVE_DIR" "$NEGATIVE_DIR" "$BACKGROUND_DIR" "$RIR_DIR" "$FEATURE_BANK_DIR" "$DATA_ROOT/logs"
 
 if [[ ! -x "$PY" ]]; then
   echo "Creating training venv: $VENV_DIR"
@@ -122,5 +124,6 @@ export NWW_PERSONAL_DIR="$POSITIVE_DIR"
 export NWW_NEGATIVE_DIR="$NEGATIVE_DIR"
 export NWW_BACKGROUND_DIR="$BACKGROUND_DIR"
 export NWW_RIR_DIR="$RIR_DIR"
+export NWW_FEATURE_BANK_DIR="$FEATURE_BANK_DIR"
 
 "$PY" scripts/train_nanowakeword.py "$@"
