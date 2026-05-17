@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -278,8 +279,7 @@ def sync_artifacts(output_dir: Path, export_dir: Path, model_name: str, metadata
     return copied
 
 
-def run_training(config_path: Path) -> None:
-    stage_flags = ["-G", "-t", "-T"]
+def run_nanowakeword(config_path: Path, stage_flags: list[str]) -> None:
     with config_path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     if bool(config.get("overwrite")):
@@ -299,6 +299,60 @@ def run_training(config_path: Path) -> None:
         if idx < len(candidates):
             log(f"Command form exited {result.returncode}; trying the next NanoWakeWord CLI form.")
     raise SystemExit(last_code)
+
+
+def write_stage_config(
+    config: dict[str, Any],
+    config_path: Path,
+    suffix: str,
+    *,
+    generate_clips: bool = False,
+    transform_clips: bool = False,
+    train_model: bool = False,
+    feature_generation_manifest: dict[str, Any] | None = None,
+) -> Path:
+    stage_config = copy.deepcopy(config)
+    stage_config["generate_clips"] = generate_clips
+    stage_config["transform_clips"] = transform_clips
+    stage_config["train_model"] = train_model
+    stage_config["distill"] = False
+    stage_config.setdefault("distillation", {})["enabled"] = False
+    if feature_generation_manifest is not None:
+        stage_config["feature_generation_manifest"] = feature_generation_manifest
+    path = config_path.with_name(f"{config_path.stem}.{suffix}{config_path.suffix}")
+    path.write_text(yaml.safe_dump(stage_config, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def run_training(config_path: Path) -> None:
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+
+    if config.get("generate_clips"):
+        run_nanowakeword(
+            write_stage_config(config, config_path, "generate", generate_clips=True),
+            ["-G"],
+        )
+
+    feature_jobs = config.get("feature_generation_manifest") or {}
+    if config.get("transform_clips") and feature_jobs:
+        for job_name, recipe in feature_jobs.items():
+            run_nanowakeword(
+                write_stage_config(
+                    config,
+                    config_path,
+                    f"features.{safe_name(str(job_name))}",
+                    transform_clips=True,
+                    feature_generation_manifest={job_name: recipe},
+                ),
+                ["-t"],
+            )
+
+    if config.get("train_model"):
+        run_nanowakeword(
+            write_stage_config(config, config_path, "train", train_model=True),
+            ["-T"],
+        )
 
 
 def parse_args() -> argparse.Namespace:
