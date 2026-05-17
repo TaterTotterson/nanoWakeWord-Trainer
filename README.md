@@ -29,6 +29,10 @@ http://127.0.0.1:8792
 
 Open the UI, enter a wake phrase, upload some positive/negative audio if you have it, then start training.
 
+When changing sample counts, background/RIR clips, or validation settings for an existing wake phrase, enable **Regenerate feature files** in the UI or pass `--overwrite` on the CLI so NanoWakeWord does not reuse stale `.npy` feature files.
+
+For early real-room tests, add false wakes and normal room audio to `negative_samples/` before retraining. Pure synthetic data can pass training loss while still false-triggering on satellite microphone audio.
+
 The trainer writes generated configs and model outputs under:
 
 ```text

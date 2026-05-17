@@ -18,6 +18,7 @@ Options are passed through to scripts/train_nanowakeword.py:
   --layer-size 32
   --num-workers 4
   --custom-negative-phrase "phrase"
+  --overwrite
 
 Environment:
   NWW_DATA_DIR=/data                  persistent Docker data root

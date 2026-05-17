@@ -75,6 +75,8 @@
     .label { display:block; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:7px; }
     .value { font-size: 25px; font-weight: 800; }
     label { display:grid; gap: 6px; color: var(--muted); font-size: 13px; }
+    .check { display:flex; align-items:center; gap: 10px; }
+    .check input { width: auto; }
     input, select, textarea {
       width: 100%;
       border: 1px solid rgba(255,255,255,.12);
@@ -169,6 +171,10 @@
           </label>
           <label class="wide">Custom Negative Phrases
             <textarea id="negativePhrases" placeholder="One phrase per line"></textarea>
+          </label>
+          <label class="wide check">
+            <input id="overwriteFeatures" type="checkbox">
+            Regenerate feature files
           </label>
         </div>
         <div class="row" style="margin-top:12px;">
@@ -328,6 +334,7 @@
         layer_size: Number($("layerSize").value || 32),
         num_workers: Number($("numWorkers").value || 4),
         target_fp_per_hour: Number($("targetFp").value || 0.5),
+        overwrite: $("overwriteFeatures").checked,
         custom_negative_phrases: $("negativePhrases").value.split(/\n+/).map((s) => s.trim()).filter(Boolean),
       };
       await api("/api/train", { method: "POST", body: JSON.stringify(body) });

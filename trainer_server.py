@@ -387,6 +387,8 @@ async def start_training(request: Request) -> JSONResponse:
         "--target-fp-per-hour",
         str(float(payload.get("target_fp_per_hour") or 0.5)),
     ]
+    if bool(payload.get("overwrite")):
+        cmd.append("--overwrite")
     for item in payload.get("custom_negative_phrases") or []:
         phrase_item = str(item or "").strip()
         if phrase_item:

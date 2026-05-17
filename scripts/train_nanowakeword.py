@@ -65,9 +65,33 @@ def add_feature_task(
         "use_rir": has_rirs,
         "augmentation_rounds": 1,
     }
-    manifest_key = "targets" if split == "target" else "negatives"
+    manifest_keys = {
+        "target": "targets",
+        "negative": "negatives",
+        "target_val": "targets_val",
+        "negative_val": "negatives_val",
+    }
+    manifest_key = manifest_keys.get(split)
+    if not manifest_key:
+        raise ValueError(f"Unknown feature split: {split}")
     config.setdefault("feature_manifest", {}).setdefault(manifest_key, {})[key] = str(feature_path)
-    config.setdefault("batch_composition", {})[key] = 32 if split == "target" else 64
+    if split in {"target", "negative"}:
+        config.setdefault("batch_composition", {})[key] = 32 if split == "target" else 64
+
+
+def negative_text_source(args: argparse.Namespace, samples: int) -> dict[str, Any]:
+    negative_phrases = [item for item in args.custom_negative_phrase if item.strip()]
+    if negative_phrases:
+        return {
+            "type": "from_list",
+            "phrases": negative_phrases,
+            "repeat_each": max(1, samples // max(1, len(negative_phrases))),
+        }
+    return {
+        "type": "auto_adversarial",
+        "base_phrase": args.phrase,
+        "include_partial_phrase": True,
+    }
 
 
 def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> dict[str, Any]:
@@ -80,6 +104,7 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
     positive_generated = generated_dir / "positive"
     negative_generated = generated_dir / "negative"
     validation_generated = generated_dir / "validation_positive"
+    validation_negative_generated = generated_dir / "validation_negative"
     background_paths = [str(background_dir)] if existing_wavs(background_dir) else []
     rir_paths = [str(rir_dir)] if existing_wavs(rir_dir) else []
 
@@ -102,6 +127,7 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         "distill": False,
         "convert_audio": True,
         "show_training_summary": True,
+        "overwrite": bool(args.overwrite),
         "batch_composition": {},
         "feature_manifest": {"targets": {}, "negatives": {}},
         "data_generation_tasks": [],
@@ -148,6 +174,34 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
                 },
             }
         )
+        add_feature_task(
+            config,
+            key="tv",
+            label="synthetic_validation_positive_features",
+            source_dir=validation_generated,
+            feature_file="synthetic_validation_positive_features.npy",
+            split="target_val",
+            require_existing=False,
+        )
+        config["data_generation_tasks"].append(
+            {
+                "name": "synthetic_validation_negative",
+                "enabled": True,
+                "output_dir": str(validation_negative_generated),
+                "num_samples": args.validation_samples,
+                "file_prefix": "val_neg",
+                "text_source": negative_text_source(args, args.validation_samples),
+            }
+        )
+        add_feature_task(
+            config,
+            key="nv",
+            label="synthetic_validation_negative_features",
+            source_dir=validation_negative_generated,
+            feature_file="synthetic_validation_negative_features.npy",
+            split="negative_val",
+            require_existing=False,
+        )
 
     if existing_wavs(positive_dir):
         add_feature_task(
@@ -160,20 +214,6 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         )
 
     if args.negative_samples > 0:
-        negative_phrases = [item for item in args.custom_negative_phrase if item.strip()]
-        text_source: dict[str, Any]
-        if negative_phrases:
-            text_source = {
-                "type": "from_list",
-                "phrases": negative_phrases,
-                "repeat_each": max(1, args.negative_samples // max(1, len(negative_phrases))),
-            }
-        else:
-            text_source = {
-                "type": "auto_adversarial",
-                "base_phrase": args.phrase,
-                "include_partial_phrase": True,
-            }
         config["data_generation_tasks"].append(
             {
                 "name": "synthetic_negative",
@@ -181,7 +221,7 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
                 "output_dir": str(negative_generated),
                 "num_samples": args.negative_samples,
                 "file_prefix": "neg",
-                "text_source": text_source,
+                "text_source": negative_text_source(args, args.negative_samples),
             }
         )
         add_feature_task(
@@ -240,6 +280,10 @@ def sync_artifacts(output_dir: Path, export_dir: Path, model_name: str, metadata
 
 def run_training(config_path: Path) -> None:
     stage_flags = ["-G", "-t", "-T"]
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    if bool(config.get("overwrite")):
+        stage_flags.append("--overwrite")
     candidates = [
         [*nanowakeword_cmd(), "-c", str(config_path), *stage_flags],
         [*nanowakeword_cmd(), "--config", str(config_path), *stage_flags],
@@ -277,6 +321,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-recall", type=float, default=0.90)
     parser.add_argument("--target-fp-per-hour", type=float, default=0.5)
     parser.add_argument("--custom-negative-phrase", action="append", default=[])
+    parser.add_argument("--overwrite", action="store_true", help="Regenerate feature files instead of reusing existing .npy artifacts.")
     return parser.parse_args()
 
 
