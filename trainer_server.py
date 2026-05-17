@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +23,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = ROOT_DIR / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from architecture_catalog import architecture_list, normalize_model_type  # noqa: E402
+
 DATA_DIR = Path(os.environ.get("NWW_DATA_DIR", str(ROOT_DIR))).resolve()
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", str(ROOT_DIR / "static"))).resolve()
 PERSONAL_DIR = Path(os.environ.get("NWW_PERSONAL_DIR", str(DATA_DIR / "personal_samples"))).resolve()
@@ -146,6 +153,13 @@ def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
     if value is None or value == "":
         return default
     return float(value)
+
+
+def _payload_model_type(payload: dict[str, Any]) -> str:
+    try:
+        return normalize_model_type(str(payload.get("model_type") or "dnn"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _is_target_wav(path: Path) -> bool:
@@ -299,8 +313,14 @@ def status() -> JSONResponse:
                 "steps": int(os.environ.get("NWW_DEFAULT_STEPS", str(DEFAULT_STEPS))),
                 "num_workers": int(os.environ.get("NWW_DEFAULT_NUM_WORKERS", str(DEFAULT_NUM_WORKERS))),
             },
+            "architectures": architecture_list(),
         }
     )
+
+
+@app.get("/api/architectures")
+def architectures() -> JSONResponse:
+    return JSONResponse({"items": architecture_list()})
 
 
 @app.get("/api/samples/{kind}")
@@ -385,6 +405,7 @@ async def start_training(request: Request) -> JSONResponse:
             raise HTTPException(status_code=409, detail="Training is already running")
 
     safe_word = safe_name(phrase)
+    model_type = _payload_model_type(payload)
     log_path = LOG_DIR / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{safe_word}.log"
 
     cmd = [
@@ -401,7 +422,7 @@ async def start_training(request: Request) -> JSONResponse:
         "--num-workers",
         str(_payload_int(payload, "num_workers", DEFAULT_NUM_WORKERS)),
         "--model-type",
-        str(payload.get("model_type") or "dnn"),
+        model_type,
         "--layer-size",
         str(_payload_int(payload, "layer_size", 32)),
         "--target-fp-per-hour",

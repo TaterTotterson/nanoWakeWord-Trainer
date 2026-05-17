@@ -14,7 +14,7 @@ Options are passed through to scripts/train_nanowakeword.py:
   --positive-samples 2500
   --negative-samples 5000
   --validation-samples 2000
-  --model-type dnn|lstm|tc-resnet
+  --model-type dnn|rnn|cnn|lstm|gru|crnn|tcn|bcresnet|quartznet|transformer|conformer|e_branchformer
   --layer-size 32
   --num-workers 0
   --custom-negative-phrase "phrase"

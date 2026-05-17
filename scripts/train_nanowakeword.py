@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from architecture_catalog import architecture_metadata, normalize_model_type
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MODEL_SUFFIXES = {".onnx", ".pt", ".pth"}
 DEFAULT_POSITIVE_SAMPLES = 2500
@@ -506,7 +508,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_VALIDATION_SAMPLES)
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS)
-    parser.add_argument("--model-type", default="dnn")
+    parser.add_argument("--model-type", type=model_type_arg, default="dnn")
     parser.add_argument("--layer-size", type=int, default=32)
     parser.add_argument("--target-accuracy", type=float, default=0.95)
     parser.add_argument("--target-recall", type=float, default=0.90)
@@ -514,6 +516,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--custom-negative-phrase", action="append", default=[])
     parser.add_argument("--overwrite", action="store_true", help="Regenerate feature files instead of reusing existing .npy artifacts.")
     return parser.parse_args()
+
+
+def model_type_arg(value: str) -> str:
+    try:
+        return normalize_model_type(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def main() -> int:
@@ -525,6 +534,7 @@ def main() -> int:
     model_output_dir.mkdir(parents=True, exist_ok=True)
 
     config = make_config(args, model_name, output_root)
+    architecture = architecture_metadata(args.model_type)
     config_path = model_output_dir / f"{model_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
@@ -534,6 +544,7 @@ def main() -> int:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "config": str(config_path),
         "model_type": args.model_type,
+        "architecture": architecture,
         "steps": args.steps,
         "hard_negative_samples": config.get("hard_negative_samples", 0),
         "feature_bank_dir": str(feature_bank_dir(output_root)),

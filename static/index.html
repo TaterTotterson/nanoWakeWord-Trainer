@@ -94,7 +94,17 @@
     .small { color: var(--muted); font-size: 13px; }
     .pill { display:inline-flex; gap:6px; align-items:center; border:1px solid rgba(255,255,255,.1); border-radius:999px; padding:4px 10px; color:var(--muted); background:rgba(255,255,255,.06); font-size:12px; }
     .pill.ok { color:var(--ok); border-color: rgba(69,217,159,.28); background: rgba(69,217,159,.08); }
+    .pill.warn { color:var(--orange2); border-color: rgba(255,192,128,.3); background: rgba(255,122,26,.08); }
     .pill.err { color:var(--err); border-color: rgba(255,102,102,.28); background: rgba(255,102,102,.08); }
+    .architecture {
+      display:grid;
+      gap:10px;
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:14px;
+      background:rgba(255,255,255,.035);
+      padding:12px;
+    }
+    .architecture-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .drop { border:1px dashed rgba(255,192,128,.3); border-radius: 16px; padding: 14px; background: rgba(255,122,26,.05); display:grid; gap: 9px; }
     .list { display:grid; gap:8px; margin-top:10px; }
     .item { display:grid; grid-template-columns: minmax(0, 1fr) auto; gap:10px; align-items:center; border:1px solid rgba(255,255,255,.08); border-radius:12px; background:rgba(255,255,255,.035); padding:10px 12px; }
@@ -154,15 +164,27 @@
             <input id="validationSamples" type="number" min="0" step="50" value="2000">
           </label>
           <label>Model Type
-            <select id="modelType">
-              <option value="dnn">DNN</option>
-              <option value="lstm">LSTM</option>
-              <option value="tc-resnet">TC-ResNet</option>
-            </select>
+            <select id="modelType"></select>
           </label>
           <label>Layer Size
             <input id="layerSize" type="number" min="8" step="8" value="32">
           </label>
+          <div class="architecture wide">
+            <div class="row" style="justify-content:space-between;">
+              <strong id="architectureLabel">DNN</strong>
+              <span id="architectureStatus" class="pill ok">Production-ready</span>
+            </div>
+            <div class="architecture-grid">
+              <div>
+                <span class="label">Best Use</span>
+                <div id="architectureUse" class="small"></div>
+              </div>
+              <div>
+                <span class="label">Profile</span>
+                <div id="architectureProfile" class="small"></div>
+              </div>
+            </div>
+          </div>
           <label>Workers
             <input id="numWorkers" type="number" min="0" step="1" value="0">
           </label>
@@ -233,6 +255,10 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    let architectures = [];
+    let architectureById = {};
+    let architecturesLoaded = false;
+
     const api = async (url, options = {}) => {
       const res = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
       if (!res.ok) {
@@ -249,6 +275,30 @@
       if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
       return `${(n / 1024 / 1024).toFixed(1)} MB`;
     };
+
+    function populateArchitectures(items) {
+      if (architecturesLoaded || !Array.isArray(items) || !items.length) return;
+      architectures = items;
+      architectureById = Object.fromEntries(items.map((item) => [item.id, item]));
+      const current = $("modelType").value || "dnn";
+      $("modelType").innerHTML = items.map((item) => `
+        <option value="${escapeHtml(item.id)}">${escapeHtml(item.label)} - ${escapeHtml(item.profile)}</option>
+      `).join("");
+      $("modelType").value = architectureById[current] ? current : "dnn";
+      architecturesLoaded = true;
+      updateArchitectureDetail();
+    }
+
+    function updateArchitectureDetail() {
+      const selected = $("modelType").value || "dnn";
+      const arch = architectureById[selected] || architectures[0];
+      if (!arch) return;
+      $("architectureLabel").textContent = arch.label;
+      $("architectureStatus").textContent = arch.status_label || arch.status;
+      $("architectureStatus").className = `pill ${arch.status === "production" ? "ok" : "warn"}`;
+      $("architectureUse").textContent = arch.use_case || "";
+      $("architectureProfile").textContent = arch.profile || "";
+    }
 
     async function uploadKind(kind) {
       const input = $(`${kind}Upload`);
@@ -293,6 +343,7 @@
 
     const refresh = async () => {
       const status = await api("/api/status");
+      populateArchitectures(status.architectures || []);
       $("countPersonal").textContent = status.counts.personal || 0;
       $("countNegative").textContent = status.counts.negative || 0;
       $("countCaptured").textContent = status.counts.captured || 0;
@@ -343,6 +394,7 @@
     $("stopBtn").addEventListener("click", async () => { await api("/api/train/stop", { method: "POST", body: "{}" }); await refresh(); });
     $("refreshBtn").addEventListener("click", refresh);
     $("logRefreshBtn").addEventListener("click", refreshLog);
+    $("modelType").addEventListener("change", updateArchitectureDetail);
     document.querySelectorAll("[data-upload]").forEach((btn) => btn.addEventListener("click", () => uploadKind(btn.dataset.upload)));
     setInterval(refresh, 5000);
     refresh().catch((err) => { $("logBox").textContent = err.message; });
