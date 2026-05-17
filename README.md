@@ -1,3 +1,12 @@
+<div align="center">
+  <a href="https://taterassistant.com">
+    <img src="images/tater-repo-logo.png" alt="NanoWakeWord Trainer" width="460"/>
+  </a>
+</div>
+<h3 align="center">
+  <a href="https://taterassistant.com">taterassistant.com</a>
+</h3>
+
 # Tater NanoWakeWord Trainer
 
 A small web trainer for building NanoWakeWord models that Tater satellites can use through Tater's remote NanoWakeWord server.
