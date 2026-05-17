@@ -1,4 +1,4 @@
-nanowakeword[train]
+nanowakeword[train]==2.1.2
 piper-tts
 PyYAML>=6.0.1
 numpy>=1.24.0
