@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.recorder-venv/
+.venv/
+.cache/
+captured_audio/
+personal_samples/
+negative_samples/
+background_samples/
+rir_samples/
+logs/
+output/
+trained_wake_words/
+vendor/

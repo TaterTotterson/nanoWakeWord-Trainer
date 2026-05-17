@@ -1,0 +1,57 @@
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    REC_HOST=0.0.0.0 \
+    REC_PORT=8792 \
+    REC_VENV_DIR=/opt/nanowakeword-ui-venv \
+    NWW_DATA_DIR=/data \
+    NWW_VENV_DIR=/opt/nanowakeword-train-venv \
+    NWW_TORCH_VERSION=2.6.0 \
+    NWW_TORCH_CUDA=cu124 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ca-certificates \
+        curl \
+        git \
+        ffmpeg \
+        build-essential \
+        libsndfile1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+COPY requirements-ui.txt requirements-train.txt ./
+
+RUN python -m venv "$REC_VENV_DIR" \
+    && "$REC_VENV_DIR/bin/python" -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && "$REC_VENV_DIR/bin/python" -m pip install --no-cache-dir -r requirements-ui.txt \
+    && touch "$REC_VENV_DIR/.ui_deps_installed"
+
+RUN python -m venv "$NWW_VENV_DIR" \
+    && "$NWW_VENV_DIR/bin/python" -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && "$NWW_VENV_DIR/bin/python" -m pip install --no-cache-dir \
+        --index-url "https://download.pytorch.org/whl/${NWW_TORCH_CUDA}" \
+        "torch==${NWW_TORCH_VERSION}+${NWW_TORCH_CUDA}" \
+        "torchaudio==${NWW_TORCH_VERSION}+${NWW_TORCH_CUDA}" \
+    && "$NWW_VENV_DIR/bin/python" -m pip install --no-cache-dir -r requirements-train.txt \
+    && touch "$NWW_VENV_DIR/.train_deps_installed" \
+    && printf "%s+%s\n" "$NWW_TORCH_VERSION" "$NWW_TORCH_CUDA" > "$NWW_VENV_DIR/.train_deps_key" \
+    && "$NWW_VENV_DIR/bin/python" -c "import torch, torchaudio, nanowakeword; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
+
+COPY . /app
+
+RUN mkdir -p /data
+
+EXPOSE 8792
+
+CMD ["./run.sh"]

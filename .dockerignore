@@ -1,0 +1,14 @@
+.git
+.DS_Store
+__pycache__/
+.recorder-venv/
+.venv/
+.cache/
+logs/
+output/
+trained_wake_words/
+captured_audio/
+personal_samples/
+negative_samples/
+background_samples/
+rir_samples/
