@@ -56,14 +56,15 @@ def add_feature_task(
     if require_existing and not existing_wavs(source_dir):
         return
     feature_path = Path(config["output_dir"]) / config["model_name"] / "features" / feature_file
-    config.setdefault("feature_generation_tasks", []).append(
-        {
-            "name": label,
-            "data_path": str(source_dir),
-            "output_path": str(feature_path),
-            "overwrite": True,
-        }
-    )
+    has_backgrounds = bool(config.get("background_paths"))
+    has_rirs = bool(config.get("rir_paths"))
+    config.setdefault("feature_generation_manifest", {})[label] = {
+        "input_audio_dirs": [str(source_dir)],
+        "output_filename": feature_file,
+        "use_background_noise": has_backgrounds,
+        "use_rir": has_rirs,
+        "augmentation_rounds": 1,
+    }
     manifest_key = "targets" if split == "target" else "negatives"
     config.setdefault("feature_manifest", {}).setdefault(manifest_key, {})[key] = str(feature_path)
     config.setdefault("batch_composition", {})[key] = 32 if split == "target" else 64
@@ -76,11 +77,18 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
     rir_dir = Path(args.rir_dir).resolve()
     model_dir = output_dir / model_name
     generated_dir = model_dir / "generated"
+    positive_generated = generated_dir / "positive"
+    negative_generated = generated_dir / "negative"
+    validation_generated = generated_dir / "validation_positive"
+    background_paths = [str(background_dir)] if existing_wavs(background_dir) else []
+    rir_paths = [str(rir_dir)] if existing_wavs(rir_dir) else []
 
     config: dict[str, Any] = {
         "model_name": model_name,
         "target_phrase": args.phrase,
         "output_dir": str(output_dir),
+        "positive_data_path": str(positive_generated if args.positive_samples > 0 else positive_dir),
+        "negative_data_path": str(negative_generated if args.negative_samples > 0 else negative_dir),
         "model_type": args.model_type,
         "layer_size": args.layer_size,
         "steps": args.steps,
@@ -88,21 +96,32 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         "target_accuracy": args.target_accuracy,
         "target_recall": args.target_recall,
         "target_false_positives_per_hour": args.target_fp_per_hour,
+        "generate_clips": args.positive_samples > 0 or args.negative_samples > 0 or args.validation_samples > 0,
+        "transform_clips": True,
+        "train_model": True,
+        "distill": False,
+        "convert_audio": True,
+        "show_training_summary": True,
         "batch_composition": {},
         "feature_manifest": {"targets": {}, "negatives": {}},
         "data_generation_tasks": [],
-        "feature_generation_tasks": [],
+        "feature_generation_manifest": {},
+        "background_paths": background_paths,
+        "rir_paths": rir_paths,
     }
 
     if args.positive_samples > 0:
-        positive_generated = generated_dir / "positive"
         config["data_generation_tasks"].append(
             {
                 "name": "synthetic_positive",
-                "type": "positive",
-                "phrase": args.phrase,
+                "enabled": True,
                 "output_dir": str(positive_generated),
                 "num_samples": args.positive_samples,
+                "file_prefix": "pos",
+                "text_source": {
+                    "type": "fixed_phrase",
+                    "phrase": args.phrase,
+                },
             }
         )
         add_feature_task(
@@ -116,14 +135,17 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         )
 
     if args.validation_samples > 0:
-        validation_generated = generated_dir / "validation_positive"
         config["data_generation_tasks"].append(
             {
                 "name": "synthetic_validation_positive",
-                "type": "positive",
-                "phrase": args.phrase,
+                "enabled": True,
                 "output_dir": str(validation_generated),
                 "num_samples": args.validation_samples,
+                "file_prefix": "val_pos",
+                "text_source": {
+                    "type": "fixed_phrase",
+                    "phrase": args.phrase,
+                },
             }
         )
 
@@ -138,15 +160,28 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         )
 
     if args.negative_samples > 0:
-        negative_generated = generated_dir / "negative"
         negative_phrases = [item for item in args.custom_negative_phrase if item.strip()]
+        text_source: dict[str, Any]
+        if negative_phrases:
+            text_source = {
+                "type": "from_list",
+                "phrases": negative_phrases,
+                "repeat_each": max(1, args.negative_samples // max(1, len(negative_phrases))),
+            }
+        else:
+            text_source = {
+                "type": "auto_adversarial",
+                "base_phrase": args.phrase,
+                "include_partial_phrase": True,
+            }
         config["data_generation_tasks"].append(
             {
                 "name": "synthetic_negative",
-                "type": "negative",
-                "phrases": negative_phrases,
+                "enabled": True,
                 "output_dir": str(negative_generated),
                 "num_samples": args.negative_samples,
+                "file_prefix": "neg",
+                "text_source": text_source,
             }
         )
         add_feature_task(
@@ -168,11 +203,6 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             feature_file="personal_negative_features.npy",
             split="negative",
         )
-
-    if existing_wavs(background_dir):
-        config["background_paths"] = [str(background_dir)]
-    if existing_wavs(rir_dir):
-        config["rir_paths"] = [str(rir_dir)]
 
     if not config["feature_manifest"]["targets"]:
         raise SystemExit("No positive data configured. Add positive clips or set --positive-samples above 0.")
@@ -209,10 +239,10 @@ def sync_artifacts(output_dir: Path, export_dir: Path, model_name: str, metadata
 
 
 def run_training(config_path: Path) -> None:
+    stage_flags = ["-G", "-t", "-T"]
     candidates = [
-        [*nanowakeword_cmd(), "-c", str(config_path)],
-        [*nanowakeword_cmd(), "--config", str(config_path)],
-        [*nanowakeword_cmd(), "--config_path", str(config_path)],
+        [*nanowakeword_cmd(), "-c", str(config_path), *stage_flags],
+        [*nanowakeword_cmd(), "--config", str(config_path), *stage_flags],
     ]
     last_code = 1
     for idx, cmd in enumerate(candidates, start=1):
@@ -258,7 +288,7 @@ def main() -> int:
     model_output_dir = output_root / model_name
     model_output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = make_config(args, model_name, model_output_dir)
+    config = make_config(args, model_name, output_root)
     config_path = model_output_dir / f"{model_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
