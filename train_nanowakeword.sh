@@ -38,6 +38,7 @@ Environment:
   NWW_FEATURE_BANK_DIR=/data/feature_banks
   NWW_POSITIVE_TTS_DIR=/data/generated_samples
   NWW_TORCH_DEVICE=auto|cpu|mps|cuda
+  NWW_FEATURE_DEVICE=cpu|gpu|auto       CPU matches satellite inference (default)
 EOF
   exit 1
 fi
@@ -82,7 +83,7 @@ source "$VENV_DIR/bin/activate"
 
 install_cuda_torch() {
   local torch_version torch_cuda
-  torch_version="${NWW_TORCH_VERSION:-2.6.0}"
+  torch_version="${NWW_TORCH_VERSION:-2.8.0}"
   torch_cuda="${NWW_TORCH_CUDA:-}"
   if [[ -z "$torch_cuda" || "${NWW_FORCE_CPU:-0}" == "1" ]]; then
     return
@@ -120,10 +121,23 @@ if [[ ! -f "$VENV_DIR/.train_deps_installed" || "$(cat "$VENV_DIR/.train_deps_ke
   if [[ -n "${NWW_TORCH_CUDA:-}" && "${NWW_FORCE_CPU:-0}" != "1" ]]; then
     install_cuda_torch
     FILTERED_REQUIREMENTS="$(write_filtered_train_requirements)"
-    "$PY" -m pip install -r "$FILTERED_REQUIREMENTS"
+    TORCH_CONSTRAINTS="$VENV_DIR/requirements-train.torch-constraints.txt"
+    printf "torch==%s\ntorchaudio==%s\n" \
+      "${NWW_TORCH_VERSION:-2.8.0}" "${NWW_TORCH_VERSION:-2.8.0}" > "$TORCH_CONSTRAINTS"
+    "$PY" -m pip install -c "$TORCH_CONSTRAINTS" -r "$FILTERED_REQUIREMENTS"
   else
     "$PY" -m pip install -r requirements-train.txt
   fi
+  "$PY" - <<'PY'
+import importlib.metadata
+import torch
+
+print(
+    "NanoWakeWord dependencies: "
+    f"nanowakeword={importlib.metadata.version('nanowakeword')}, "
+    f"torch={torch.__version__}, cuda={torch.version.cuda or 'none'}"
+)
+PY
   touch "$VENV_DIR/.train_deps_installed"
   printf "%s\n" "$TRAIN_DEPS_KEY" > "$VENV_DIR/.train_deps_key"
 else

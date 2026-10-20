@@ -303,6 +303,7 @@ def add_feature_task(
         )
     fingerprint = {
         "recipe_version": FEATURE_GENERATION_RECIPE_VERSION,
+        "feature_device": os.environ.get("NWW_FEATURE_DEVICE", "cpu").strip().lower(),
         "source": source_fingerprint,
         "supporting_audio": supporting_audio,
         "augmentation_rounds": augmentation_rounds,
@@ -315,6 +316,17 @@ def add_feature_task(
         cached_fingerprint = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         cached_fingerprint = None
+    # Feature caches made by the Apple trainer before provider tracking were
+    # already CPU ONNX features (MPS was used only for model training). Adopt
+    # those without a multi-hour rebuild. CUDA trainers expose NWW_TORCH_CUDA,
+    # so their unlabelled caches are deliberately invalidated once.
+    if (
+        isinstance(cached_fingerprint, dict)
+        and "feature_device" not in cached_fingerprint
+        and fingerprint["feature_device"] == "cpu"
+        and not os.environ.get("NWW_TORCH_CUDA")
+    ):
+        cached_fingerprint = {**cached_fingerprint, "feature_device": "cpu"}
     if (feature_path.exists() or feature_path.is_symlink()) and cached_fingerprint != fingerprint:
         feature_path.unlink()
         log(f"Rebuilding stale feature cache: {feature_path}")

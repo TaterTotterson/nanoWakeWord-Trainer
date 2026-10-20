@@ -49,7 +49,9 @@ The normal training run uses the higher-quality NanoWakeWord recipe by default:
 - 2,000 validation positive/negative samples
 - stronger augmentation and validation-aware training defaults
 - `num_workers=0` by default for better stability in Docker/GPU runs
-- automatic CUDA or Apple Metal (MPS) training when available
+- automatic CUDA or Apple Metal (MPS) model training when available; feature
+  extraction stays on the CPU ONNX path by default so training matches
+  satellite inference (`NWW_FEATURE_DEVICE=gpu` remains an expert override)
 - two validated architecture choices: CNN for higher recall and GRU for lower
   false-trigger behavior; DNN and the unvalidated upstream architectures are
   intentionally not offered

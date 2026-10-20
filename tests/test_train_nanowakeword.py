@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -298,6 +299,53 @@ class TrainerDataTests(unittest.TestCase):
             self.assertFalse(feature.exists())
             self.assertTrue(clip.exists())
             self.assertTrue(feature.with_name("personal.npy.tater.json").exists())
+
+    def test_unlabelled_cuda_feature_cache_is_rebuilt_for_cpu_runtime_parity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            write_wav(source / "one.wav", np.zeros(1600, dtype=np.int16))
+            feature = root / "output" / "wake" / "features" / "personal.npy"
+            config = {
+                "output_dir": str(root / "output"),
+                "model_name": "wake",
+                "background_paths": [],
+                "rir_paths": [],
+            }
+
+            trainer.add_feature_task(
+                config,
+                key="tp",
+                label="personal_features",
+                source_dir=source,
+                feature_file="personal.npy",
+                split="target",
+            )
+            cache = feature.with_name("personal.npy.tater.json")
+            fingerprint = json.loads(cache.read_text(encoding="utf-8"))
+            fingerprint.pop("feature_device")
+            cache.write_text(json.dumps(fingerprint), encoding="utf-8")
+            feature.write_bytes(b"unlabelled-cuda-features")
+
+            with mock.patch.dict(
+                os.environ,
+                {"NWW_FEATURE_DEVICE": "cpu", "NWW_TORCH_CUDA": "cu128"},
+                clear=False,
+            ):
+                trainer.add_feature_task(
+                    config,
+                    key="tp",
+                    label="personal_features",
+                    source_dir=source,
+                    feature_file="personal.npy",
+                    split="target",
+                )
+
+            self.assertFalse(feature.exists())
+            self.assertEqual(
+                json.loads(cache.read_text(encoding="utf-8"))["feature_device"],
+                "cpu",
+            )
 
     def test_adversarial_probabilities_are_not_booleans(self) -> None:
         args = argparse.Namespace(custom_negative_phrase=[], phrase="hey tater")
