@@ -171,8 +171,8 @@
           </label>
           <div class="architecture wide">
             <div class="row" style="justify-content:space-between;">
-              <strong id="architectureLabel">DNN</strong>
-              <span id="architectureStatus" class="pill ok">Production-ready</span>
+              <strong id="architectureLabel">CNN</strong>
+              <span id="architectureStatus" class="pill ok">Streaming validated</span>
             </div>
             <div class="architecture-grid">
               <div>
@@ -280,17 +280,17 @@
       if (architecturesLoaded || !Array.isArray(items) || !items.length) return;
       architectures = items;
       architectureById = Object.fromEntries(items.map((item) => [item.id, item]));
-      const current = $("modelType").value || "dnn";
+      const current = $("modelType").value || "cnn";
       $("modelType").innerHTML = items.map((item) => `
         <option value="${escapeHtml(item.id)}">${escapeHtml(item.label)} - ${escapeHtml(item.profile)}</option>
       `).join("");
-      $("modelType").value = architectureById[current] ? current : "dnn";
+      $("modelType").value = architectureById[current] ? current : "cnn";
       architecturesLoaded = true;
       updateArchitectureDetail();
     }
 
     function updateArchitectureDetail() {
-      const selected = $("modelType").value || "dnn";
+      const selected = $("modelType").value || "cnn";
       const arch = architectureById[selected] || architectures[0];
       if (!arch) return;
       $("architectureLabel").textContent = arch.label;
@@ -298,6 +298,7 @@
       $("architectureStatus").className = `pill ${arch.status === "production" ? "ok" : "warn"}`;
       $("architectureUse").textContent = arch.use_case || "";
       $("architectureProfile").textContent = arch.profile || "";
+      if (arch.layer_size) $("layerSize").value = arch.layer_size;
     }
 
     async function uploadKind(kind) {
@@ -382,7 +383,7 @@
         negative_samples: Number($("negativeSamples").value || 5000),
         validation_samples: Number($("validationSamples").value || 2000),
         model_type: $("modelType").value,
-        layer_size: Number($("layerSize").value || 32),
+        layer_size: Number($("layerSize").value || (architectureById[$("modelType").value]?.layer_size ?? 128)),
         num_workers: Number($("numWorkers").value || 0),
         target_fp_per_hour: Number($("targetFp").value || 0.5),
         overwrite: $("overwriteFeatures").checked,

@@ -27,7 +27,7 @@ SCRIPTS_DIR = ROOT_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from architecture_catalog import architecture_list, normalize_model_type  # noqa: E402
+from architecture_catalog import architecture_list, architecture_metadata, normalize_model_type  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("NWW_DATA_DIR", str(ROOT_DIR))).resolve()
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", str(ROOT_DIR / "static"))).resolve()
@@ -157,7 +157,7 @@ def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
 
 def _payload_model_type(payload: dict[str, Any]) -> str:
     try:
-        return normalize_model_type(str(payload.get("model_type") or "dnn"))
+        return normalize_model_type(str(payload.get("model_type") or "cnn"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -406,6 +406,7 @@ async def start_training(request: Request) -> JSONResponse:
 
     safe_word = safe_name(phrase)
     model_type = _payload_model_type(payload)
+    recommended_layer_size = int(architecture_metadata(model_type).get("layer_size", 128))
     log_path = LOG_DIR / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{safe_word}.log"
 
     cmd = [
@@ -424,7 +425,7 @@ async def start_training(request: Request) -> JSONResponse:
         "--model-type",
         model_type,
         "--layer-size",
-        str(_payload_int(payload, "layer_size", 32)),
+        str(_payload_int(payload, "layer_size", recommended_layer_size)),
         "--target-fp-per-hour",
         str(_payload_float(payload, "target_fp_per_hour", 0.5)),
     ]

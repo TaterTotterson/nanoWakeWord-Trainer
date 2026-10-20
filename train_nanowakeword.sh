@@ -12,12 +12,22 @@ Usage:
 Options are passed through to scripts/train_nanowakeword.py:
   --steps 50000
   --positive-samples 2500
+  --positive-tts-dir /path/to/generated_samples
   --negative-samples 5000
   --validation-samples 2000
-  --model-type dnn|rnn|cnn|lstm|gru|crnn|tcn|bcresnet|quartznet|transformer|conformer|e_branchformer
-  --layer-size 32
+  --model-type cnn|gru                  CNN is the default
+  --layer-size 0                       use architecture recommendation
   --num-workers 0
   --custom-negative-phrase "phrase"
+  --quality-threshold 0.90              minimum threshold considered by calibration
+  --quality-patience 2                  minimum consecutive hits considered
+  --quality-maximum-patience 4
+  --quality-minimum-recall 0.90
+  --quality-target-recall 0.95
+  --quality-target-negative-rate 0.05
+  --quality-maximum-negative-rate 0.10
+  --quality-maximum-real-negative-rate 0
+  --quality-retries 1
   --overwrite
 
 Environment:
@@ -26,6 +36,8 @@ Environment:
   NWW_FORCE_CPU=1                    disable CUDA PyTorch wheel install
   NWW_PYTHON_BIN=/path/to/python3.11  override Python
   NWW_FEATURE_BANK_DIR=/data/feature_banks
+  NWW_POSITIVE_TTS_DIR=/data/generated_samples
+  NWW_TORCH_DEVICE=auto|cpu|mps|cuda
 EOF
   exit 1
 fi
