@@ -31,19 +31,25 @@ def requested_device() -> torch.device:
 def requested_feature_device() -> str:
     """Select the ONNX provider used to build training feature arrays.
 
-    Runtime NanoWakeWord features are computed with the CPU ONNX provider on
-    Tater satellites and by the streaming quality gate.  Building feature
-    arrays with CUDA can produce a measurably different embedding space: the
-    model can look healthy against its saved arrays while firing on nearly
-    every raw negative clip.  Keep CPU as the correctness-first default while
-    still allowing CUDA for augmentation and model training.
+    CPU remains the portable standalone default. NVIDIA trainer images select
+    ``auto`` so CUDA is used when available, while Apple and CPU-only hosts can
+    continue using the same command without a separate configuration.
     """
     requested = os.environ.get("NWW_FEATURE_DEVICE", "cpu").strip().lower()
     if requested == "auto":
-        return "gpu" if torch.cuda.is_available() else "cpu"
+        if not torch.cuda.is_available():
+            return "cpu"
+        import onnxruntime as ort
+
+        return "gpu" if "CUDAExecutionProvider" in ort.get_available_providers() else "cpu"
     if requested in {"cpu", "gpu"}:
-        if requested == "gpu" and not torch.cuda.is_available():
-            raise SystemExit("NWW_FEATURE_DEVICE requested GPU, but CUDA is unavailable")
+        if requested == "gpu":
+            import onnxruntime as ort
+
+            if not torch.cuda.is_available() or "CUDAExecutionProvider" not in ort.get_available_providers():
+                raise SystemExit(
+                    "NWW_FEATURE_DEVICE requested GPU, but CUDAExecutionProvider is unavailable"
+                )
         return requested
     raise SystemExit(f"Unsupported NWW_FEATURE_DEVICE: {requested}")
 

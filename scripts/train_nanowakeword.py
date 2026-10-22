@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,8 @@ import yaml
 
 from architecture_catalog import architecture_metadata, normalize_model_type
 from evaluate_nanowakeword import calibrate_model, evaluate_model
+from feature_bank import FILENAME as BROAD_FEATURE_BANK_FILENAME
+from feature_bank import ensure_broad_negative_feature_bank
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MODEL_SUFFIXES = {".onnx", ".pt", ".pth"}
@@ -29,10 +32,10 @@ DEFAULT_HARD_NEGATIVE_SAMPLES = 3000
 DEFAULT_STEPS = 50000
 DEFAULT_NUM_WORKERS = 0
 DEFAULT_CLIP_LENGTH_SAMPLES = 32000
-DEFAULT_QUALITY_MAX_CLIPS = 200
+DEFAULT_QUALITY_MAX_CLIPS = 500
 PERSONAL_POSITIVE_MAX_SAMPLES = 25600
 PERSONAL_AUGMENTATION_ROUNDS = 50
-NEGATIVE_GENERATION_RECIPE_VERSION = 2
+NEGATIVE_GENERATION_RECIPE_VERSION = 3
 FEATURE_GENERATION_RECIPE_VERSION = 2
 
 FEATURE_BANKS = {
@@ -40,6 +43,22 @@ FEATURE_BANKS = {
     "RACON_11h_v1.npy": ("b", 90),
     "openwakeword_features_ACAV100M_2000_hrs_16bit.npy": ("oww", 1000),
 }
+
+
+def provision_feature_bank(output_dir: Path) -> Path | None:
+    if os.environ.get("NWW_REQUIRE_BROAD_FEATURE_BANK", "1").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        return None
+    bank_dir = feature_bank_dir(output_dir)
+    candidates = []
+    for value in (
+        os.environ.get("OWW_FEATURE_BANK_DIR", ""),
+        os.environ.get("OWW_ASSET_DIR", ""),
+    ):
+        if value:
+            candidates.append(Path(value).expanduser() / BROAD_FEATURE_BANK_FILENAME)
+    return ensure_broad_negative_feature_bank(bank_dir, adoption_candidates=candidates, log=log)
 
 
 def log(message: str) -> None:
@@ -213,6 +232,47 @@ def prepare_positive_training_dir(source_dir: Path, output_dir: Path) -> Path:
     return staged_dir
 
 
+def partition_uploaded_audio(
+    source_dir: Path,
+    output_dir: Path,
+    label: str,
+    *,
+    minimum_for_holdout: int = 5,
+    holdout_fraction: float = 0.20,
+) -> tuple[Path, Path | None]:
+    """Create stable train/device-holdout views without duplicating recordings."""
+    paths = existing_wavs(source_dir)
+    if len(paths) < minimum_for_holdout:
+        return source_dir, None
+    ordered = sorted(
+        paths,
+        key=lambda path: hashlib.sha256(
+            f"{path.name}\0{path.stat().st_size}".encode("utf-8")
+        ).digest(),
+    )
+    holdout_count = max(1, int(round(len(ordered) * holdout_fraction)))
+    holdout_names = {path.name for path in ordered[:holdout_count]}
+    root = output_dir / "_trainer_assets"
+    train_dir = root / f"{label}_train"
+    holdout_dir = root / f"{label}_holdout"
+    for directory, selected in (
+        (train_dir, [path for path in paths if path.name not in holdout_names]),
+        (holdout_dir, [path for path in paths if path.name in holdout_names]),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        expected = {path.name for path in selected}
+        for stale in existing_wavs(directory):
+            if stale.name not in expected:
+                stale.unlink()
+        for path in selected:
+            destination = directory / path.name
+            if destination.is_symlink() and destination.resolve() == path.resolve():
+                continue
+            destination.unlink(missing_ok=True)
+            destination.symlink_to(path.resolve())
+    return train_dir, holdout_dir
+
+
 def feature_bank_dir(output_dir: Path) -> Path:
     return Path(os.environ.get("NWW_FEATURE_BANK_DIR", str(output_dir.parent / "feature_banks"))).resolve()
 
@@ -258,6 +318,21 @@ def nanowakeword_cmd() -> list[str]:
     return [sys.executable, str(wrapper)]
 
 
+def resolved_feature_device() -> str:
+    requested = os.environ.get("NWW_FEATURE_DEVICE", "cpu").strip().lower()
+    if requested != "auto":
+        return requested
+    try:
+        import onnxruntime as ort
+        import torch
+
+        if torch.cuda.is_available() and "CUDAExecutionProvider" in ort.get_available_providers():
+            return "gpu"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def add_feature_task(
     config: dict[str, Any],
     *,
@@ -269,7 +344,7 @@ def add_feature_task(
     require_existing: bool = True,
     augmentation_rounds: int = 10,
     batch_weight: int | None = None,
-    use_rir: bool = False,
+    use_rir: bool = True,
 ) -> None:
     if require_existing and not existing_wavs(source_dir):
         return
@@ -303,7 +378,7 @@ def add_feature_task(
         )
     fingerprint = {
         "recipe_version": FEATURE_GENERATION_RECIPE_VERSION,
-        "feature_device": os.environ.get("NWW_FEATURE_DEVICE", "cpu").strip().lower(),
+        "feature_device": resolved_feature_device(),
         "source": source_fingerprint,
         "supporting_audio": supporting_audio,
         "augmentation_rounds": augmentation_rounds,
@@ -361,7 +436,15 @@ def add_feature_task(
 
 
 def negative_text_source(args: argparse.Namespace, samples: int) -> dict[str, Any]:
-    negative_phrases = [item for item in args.custom_negative_phrase if item.strip()]
+    target_key = " ".join(args.phrase.casefold().split())
+    negative_phrases = []
+    seen: set[str] = set()
+    for item in args.custom_negative_phrase:
+        phrase = " ".join(str(item).split())
+        key = phrase.casefold()
+        if phrase and key != target_key and key not in seen:
+            seen.add(key)
+            negative_phrases.append(phrase)
     if negative_phrases:
         return {
             "type": "from_list",
@@ -382,6 +465,25 @@ def negative_text_source(args: argparse.Namespace, samples: int) -> dict[str, An
     }
 
 
+def negative_text_sources(
+    args: argparse.Namespace,
+    samples: int,
+) -> list[tuple[str, int, dict[str, Any]]]:
+    """Always retain broad auto-adversarial speech and add custom phrases beside it."""
+    custom = negative_text_source(args, samples)
+    if custom.get("type") != "from_list":
+        return [("auto", samples, custom)]
+    custom_count = max(1, int(round(samples * 0.30)))
+    auto_count = max(1, samples - custom_count)
+    auto_args = copy.copy(args)
+    auto_args.custom_negative_phrase = []
+    custom["repeat_each"] = max(1, custom_count // max(1, len(custom["phrases"])))
+    return [
+        ("auto", auto_count, negative_text_source(auto_args, auto_count)),
+        ("custom", custom_count, custom),
+    ]
+
+
 def phoneme_negative_text_source(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "type": "phoneme_adversarial",
@@ -394,7 +496,10 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
     architecture = architecture_metadata(args.model_type)
     layer_size = args.layer_size if args.layer_size > 0 else int(architecture.get("layer_size", 128))
     positive_source_dir = Path(args.positive_dir).resolve()
-    positive_dir = prepare_positive_training_dir(positive_source_dir, output_dir)
+    positive_training_source, positive_holdout_dir = partition_uploaded_audio(
+        positive_source_dir, output_dir, "device_positive"
+    )
+    positive_dir = prepare_positive_training_dir(positive_training_source, output_dir)
     shared_positive_dir = (
         Path(args.positive_tts_dir).resolve() if args.positive_tts_dir else None
     )
@@ -402,23 +507,28 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         raise SystemExit(
             f"The shared positive TTS directory has no WAV files: {shared_positive_dir}"
         )
-    negative_dir = Path(args.negative_dir).resolve()
+    negative_source_dir = Path(args.negative_dir).resolve()
+    negative_dir, negative_holdout_dir = partition_uploaded_audio(
+        negative_source_dir, output_dir, "device_negative"
+    )
     mined_negative_dir = Path(args.mined_negative_dir).resolve() if args.mined_negative_dir else None
-    background_dir = Path(args.background_dir).resolve()
-    rir_dir = Path(args.rir_dir).resolve()
+    background_dirs = [Path(value).resolve() for value in args.background_dir]
+    rir_dirs = [Path(value).resolve() for value in args.rir_dir]
     model_dir = output_dir / model_name
     generated_dir = model_dir / "generated"
     positive_generated = generated_dir / "positive"
     negative_generated = generated_dir / "negative"
+    negative_custom_generated = generated_dir / "negative_custom"
     validation_generated = generated_dir / "validation_positive"
     validation_negative_generated = generated_dir / "validation_negative"
-    if existing_wavs(background_dir):
-        background_paths = [str(background_dir)]
+    validation_negative_custom_generated = generated_dir / "validation_negative_custom"
+    background_paths = [str(path) for path in background_dirs if existing_wavs(path)]
+    if background_paths:
         alignment_background = None
     else:
         alignment_background = ensure_alignment_background(output_dir)
         background_paths = [str(alignment_background)]
-    rir_paths = [str(rir_dir)] if existing_wavs(rir_dir) else []
+    rir_paths = [str(path) for path in rir_dirs if existing_wavs(path)]
     hard_negative_generated = generated_dir / "negative_phoneme"
     hard_negative_samples = (
         min(DEFAULT_HARD_NEGATIVE_SAMPLES, max(0, int(args.negative_samples * 0.6)))
@@ -448,30 +558,26 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         )
         invalidate_feature_file(model_dir, "synthetic_validation_positive_features.npy", invalidated)
 
-        validation_negative_recipe = negative_text_source(args, args.validation_samples)
-        invalidated = prepare_generation_cache(
-            validation_negative_generated,
-            {
-                "kind": "validation_negative",
-                "recipe_version": NEGATIVE_GENERATION_RECIPE_VERSION,
-                "recipe": validation_negative_recipe,
-            },
-            adopt_legacy=False,
-        )
-        invalidate_feature_file(model_dir, "synthetic_validation_negative_features.npy", invalidated)
+        for source_name, _count, recipe in negative_text_sources(args, args.validation_samples):
+            directory = validation_negative_generated if source_name == "auto" else validation_negative_custom_generated
+            feature_name = "synthetic_validation_negative_features.npy" if source_name == "auto" else "custom_validation_negative_features.npy"
+            invalidated = prepare_generation_cache(
+                directory,
+                {"kind": f"validation_negative_{source_name}", "recipe_version": NEGATIVE_GENERATION_RECIPE_VERSION, "recipe": recipe},
+                adopt_legacy=False,
+            )
+            invalidate_feature_file(model_dir, feature_name, invalidated)
 
     if args.negative_samples > 0:
-        negative_recipe = negative_text_source(args, args.negative_samples)
-        invalidated = prepare_generation_cache(
-            negative_generated,
-            {
-                "kind": "negative",
-                "recipe_version": NEGATIVE_GENERATION_RECIPE_VERSION,
-                "recipe": negative_recipe,
-            },
-            adopt_legacy=False,
-        )
-        invalidate_feature_file(model_dir, "synthetic_negative_features.npy", invalidated)
+        for source_name, _count, recipe in negative_text_sources(args, args.negative_samples):
+            directory = negative_generated if source_name == "auto" else negative_custom_generated
+            feature_name = "synthetic_negative_features.npy" if source_name == "auto" else "custom_negative_features.npy"
+            invalidated = prepare_generation_cache(
+                directory,
+                {"kind": f"negative_{source_name}", "recipe_version": NEGATIVE_GENERATION_RECIPE_VERSION, "recipe": recipe},
+                adopt_legacy=False,
+            )
+            invalidate_feature_file(model_dir, feature_name, invalidated)
 
     if hard_negative_samples > 0:
         phoneme_recipe = phoneme_negative_text_source(args)
@@ -503,11 +609,16 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         "activation_function": "relu",
         "margin_pos": 2.0,
         "margin_neg": -2.0,
-        "LOSS_BIAS": float(architecture.get("loss_bias", 0.75)),
+        "LOSS_BIAS": float(
+            getattr(args, "loss_bias", None)
+            if getattr(args, "loss_bias", None) is not None
+            else architecture.get("loss_bias", 0.75)
+        ),
         "logit_reg_weight": 0.0005,
         "logit_reg_margin": 4.0,
         "logit_min_margin": 1.5,
         "steps": args.steps,
+        "seed": int(getattr(args, "seed", 42)),
         "stabilization_steps": max(1, min(20000, max(1000, args.steps // 2), max(1, args.steps - 1))),
         "num_workers": args.num_workers,
         "optimizer_type": "adamw",
@@ -545,7 +656,7 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             "min_pitch_semitones": -1.0,
             "min_snr_in_db": 15.0,
             "pitch_prob": 0.3,
-            "rir_prob": 0.0,
+            "rir_prob": 0.7,
         },
         "val_miss_weight": 4.0,
         # False wakes are just as damaging as misses for an always-listening
@@ -571,8 +682,8 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         "hard_negative_samples": hard_negative_samples,
         "quality_evaluation": {"positive_dirs": [], "negative_dirs": []},
         "training_audio_evaluation": {
-            "positive_dirs": [str(positive_source_dir)] if existing_wavs(positive_source_dir) else [],
-            "negative_dirs": [str(negative_dir)] if existing_wavs(negative_dir) else [],
+            "positive_dirs": [str(positive_holdout_dir)] if positive_holdout_dir else [],
+            "negative_dirs": [str(negative_holdout_dir)] if negative_holdout_dir else [],
         },
     }
 
@@ -646,30 +757,27 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
             augmentation_rounds=10,
         )
         config["quality_evaluation"]["positive_dirs"].append(str(validation_generated))
-        missing = missing_generated_samples(validation_negative_generated, args.validation_samples)
-        invalidate_feature_file(model_dir, "synthetic_validation_negative_features.npy", missing > 0)
-        if missing:
-            config["data_generation_tasks"].append(
-                {
-                    "name": "synthetic_validation_negative",
-                    "enabled": True,
-                    "output_dir": str(validation_negative_generated),
-                    "num_samples": missing,
-                    "file_prefix": "val_neg",
-                    "text_source": negative_text_source(args, missing),
-                }
+        for source_name, requested, recipe in negative_text_sources(args, args.validation_samples):
+            directory = validation_negative_generated if source_name == "auto" else validation_negative_custom_generated
+            feature_name = "synthetic_validation_negative_features.npy" if source_name == "auto" else "custom_validation_negative_features.npy"
+            key = "nv" if source_name == "auto" else "nvc"
+            missing = missing_generated_samples(directory, requested)
+            invalidate_feature_file(model_dir, feature_name, missing > 0)
+            if missing:
+                generation_recipe = dict(recipe)
+                if generation_recipe.get("type") == "from_list":
+                    generation_recipe["repeat_each"] = max(1, missing // max(1, len(generation_recipe["phrases"])))
+                config["data_generation_tasks"].append(
+                    {"name": f"synthetic_validation_negative_{source_name}", "enabled": True,
+                     "output_dir": str(directory), "num_samples": missing,
+                     "file_prefix": f"val_neg_{source_name}", "text_source": generation_recipe}
+                )
+            add_feature_task(
+                config, key=key, label=feature_name.removesuffix(".npy"), source_dir=directory,
+                feature_file=feature_name, split="negative_val", require_existing=False,
+                augmentation_rounds=10,
             )
-        add_feature_task(
-            config,
-            key="nv",
-            label="synthetic_validation_negative_features",
-            source_dir=validation_negative_generated,
-            feature_file="synthetic_validation_negative_features.npy",
-            split="negative_val",
-            require_existing=False,
-            augmentation_rounds=10,
-        )
-        config["quality_evaluation"]["negative_dirs"].append(str(validation_negative_generated))
+            config["quality_evaluation"]["negative_dirs"].append(str(directory))
 
     validation_positive_dir = Path(args.validation_positive_dir).resolve() if args.validation_positive_dir else None
     if validation_positive_dir and existing_wavs(validation_positive_dir):
@@ -710,30 +818,27 @@ def make_config(args: argparse.Namespace, model_name: str, output_dir: Path) -> 
         )
 
     if args.negative_samples > 0:
-        missing = missing_generated_samples(negative_generated, args.negative_samples)
-        invalidate_feature_file(model_dir, "synthetic_negative_features.npy", missing > 0)
-        if missing:
-            config["data_generation_tasks"].append(
-                {
-                    "name": "synthetic_negative",
-                    "enabled": True,
-                    "output_dir": str(negative_generated),
-                    "num_samples": missing,
-                    "file_prefix": "neg",
-                    "text_source": negative_text_source(args, missing),
-                }
+        sources = negative_text_sources(args, args.negative_samples)
+        for source_name, requested, recipe in sources:
+            directory = negative_generated if source_name == "auto" else negative_custom_generated
+            feature_name = "synthetic_negative_features.npy" if source_name == "auto" else "custom_negative_features.npy"
+            key = "n" if source_name == "auto" else "nc"
+            missing = missing_generated_samples(directory, requested)
+            invalidate_feature_file(model_dir, feature_name, missing > 0)
+            if missing:
+                generation_recipe = dict(recipe)
+                if generation_recipe.get("type") == "from_list":
+                    generation_recipe["repeat_each"] = max(1, missing // max(1, len(generation_recipe["phrases"])))
+                config["data_generation_tasks"].append(
+                    {"name": f"synthetic_negative_{source_name}", "enabled": True,
+                     "output_dir": str(directory), "num_samples": missing,
+                     "file_prefix": f"neg_{source_name}", "text_source": generation_recipe}
+                )
+            add_feature_task(
+                config, key=key, label=feature_name.removesuffix(".npy"), source_dir=directory,
+                feature_file=feature_name, split="negative", require_existing=False,
+                augmentation_rounds=10, batch_weight=70 if len(sources) > 1 and source_name == "auto" else 30 if len(sources) > 1 else 100,
             )
-        add_feature_task(
-            config,
-            key="n",
-            label="synthetic_negative_features",
-            source_dir=negative_generated,
-            feature_file="synthetic_negative_features.npy",
-            split="negative",
-            require_existing=False,
-            augmentation_rounds=10,
-            batch_weight=100,
-        )
 
     if hard_negative_samples > 0:
         missing = missing_generated_samples(hard_negative_generated, hard_negative_samples)
@@ -1016,6 +1121,9 @@ def make_quality_retry_config(
             augmentation_rounds=PERSONAL_AUGMENTATION_ROUNDS,
             batch_weight=200,
         )
+        if str(retry.get("model_type") or "").lower() == "cnn":
+            retry["LOSS_BIAS"] = max(0.75, float(retry.get("LOSS_BIAS", 0.70)))
+            log("CNN corrective retry increased negative-class loss bias to 0.75")
 
     if not retry["feature_generation_manifest"]:
         raise ValueError("No quality-gate failures were available for a corrective retry")
@@ -1041,6 +1149,7 @@ def run_quality_gate(
     model_name: str,
     *,
     sample_partition: int = 0,
+    report_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     if args.skip_quality_gate:
         log("WARNING: streaming quality gate was explicitly skipped.")
@@ -1064,7 +1173,7 @@ def run_quality_gate(
         negative_dirs,
         minimum_threshold=args.quality_threshold,
         minimum_patience=args.quality_patience,
-        maximum_patience=getattr(args, "quality_maximum_patience", 4),
+        maximum_patience=getattr(args, "quality_maximum_patience", 5),
         max_clips_per_class=args.quality_max_clips,
         sample_partition=sample_partition,
         minimum_recall=args.quality_minimum_recall,
@@ -1126,7 +1235,8 @@ def run_quality_gate(
         for item in additional_reports
         for message in item["failures"]
     ]
-    report_path = model_output_dir / f"{model_name}.quality.json"
+    report_path = (report_dir or model_output_dir) / f"{model_name}.quality.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     log(json.dumps(report, indent=2))
     if report["passed"]:
@@ -1156,14 +1266,25 @@ def parse_args() -> argparse.Namespace:
         "--mined-negative-dir",
         help="Optional separate hard-negative WAV directory with its own balanced sampler source.",
     )
-    parser.add_argument("--background-dir", default=os.environ.get("NWW_BACKGROUND_DIR", str(ROOT_DIR / "background_samples")))
-    parser.add_argument("--rir-dir", default=os.environ.get("NWW_RIR_DIR", str(ROOT_DIR / "rir_samples")))
+    parser.add_argument(
+        "--background-dir",
+        action="append",
+        default=[],
+        help="Raw background-audio directory; repeat to combine multiple shared corpora.",
+    )
+    parser.add_argument(
+        "--rir-dir",
+        action="append",
+        default=[],
+        help="Room-impulse-response directory; repeat to combine multiple shared corpora.",
+    )
     parser.add_argument("--positive-samples", type=int, default=DEFAULT_POSITIVE_SAMPLES)
     parser.add_argument("--negative-samples", type=int, default=DEFAULT_NEGATIVE_SAMPLES)
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_VALIDATION_SAMPLES)
     parser.add_argument("--validation-positive-dir")
     parser.add_argument("--validation-negative-dir")
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument("--seed", type=int, default=int(os.environ.get("NWW_TRAIN_SEED", "42")))
     parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS)
     parser.add_argument("--model-type", type=model_type_arg, default="cnn")
     parser.add_argument(
@@ -1171,6 +1292,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Hidden layer size; 0 selects the architecture recommendation.",
+    )
+    parser.add_argument(
+        "--loss-bias",
+        type=float,
+        help="Override the architecture negative-class loss weight (CNN default: 0.70).",
     )
     parser.add_argument("--target-accuracy", type=float, default=0.95)
     parser.add_argument("--target-recall", type=float, default=0.90)
@@ -1184,7 +1310,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quality-maximum-patience",
         type=int,
-        default=4,
+        default=5,
         help="Maximum consecutive streaming hits considered during automatic calibration.",
     )
     parser.add_argument("--quality-max-clips", type=int, default=DEFAULT_QUALITY_MAX_CLIPS)
@@ -1219,11 +1345,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quality-retries",
         type=int,
-        default=1,
-        help="Corrective retraining passes using runtime-gate misses (default: 1).",
+        default=2,
+        help="Corrective retraining passes using runtime-gate misses (default: 2).",
+    )
+    parser.add_argument(
+        "--validate-existing-candidate",
+        action="store_true",
+        help="Re-run the streaming gate and export an existing ONNX candidate without retraining.",
     )
     parser.add_argument("--skip-quality-gate", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.background_dir:
+        args.background_dir = [
+            os.environ.get("NWW_BACKGROUND_DIR", str(ROOT_DIR / "background_samples"))
+        ]
+    if not args.rir_dir:
+        args.rir_dir = [os.environ.get("NWW_RIR_DIR", str(ROOT_DIR / "rir_samples"))]
+    return args
 
 
 def model_type_arg(value: str) -> str:
@@ -1241,10 +1379,18 @@ def main() -> int:
     model_output_dir = output_root / model_name
     model_output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = make_config(args, model_name, output_root)
+    provision_feature_bank(output_root)
+
     architecture = architecture_metadata(args.model_type)
     config_path = model_output_dir / f"{model_name}.yaml"
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    if args.validate_existing_candidate:
+        if not config_path.is_file():
+            raise SystemExit(f"Existing NanoWakeWord config not found: {config_path}")
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        log(f"Revalidating existing NanoWakeWord candidate: {find_onnx_model(model_output_dir, model_name)}")
+    else:
+        config = make_config(args, model_name, output_root)
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     metadata = {
         "name": model_name,
@@ -1255,21 +1401,44 @@ def main() -> int:
         "architecture": architecture,
         "steps": args.steps,
         "layer_size": config["layer_size"],
+        "loss_bias": float(config.get("LOSS_BIAS", architecture.get("loss_bias", 0.75))),
         "hard_negative_samples": config.get("hard_negative_samples", 0),
         "feature_bank_dir": str(feature_bank_dir(output_root)),
+        "seed": args.seed,
     }
-    (model_output_dir / f"{model_name}.metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if not args.validate_existing_candidate:
+        (model_output_dir / f"{model_name}.metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     log(f"NanoWakeWord config written to {config_path}")
     log(json.dumps(metadata, indent=2))
-    run_training(config_path)
-    ensure_training_completed(model_output_dir, model_name)
-    quality = run_quality_gate(args, config, model_output_dir, model_name)
+    os.environ.setdefault("PYTHONHASHSEED", str(args.seed))
+    if not args.validate_existing_candidate:
+        run_training(config_path)
+        ensure_training_completed(model_output_dir, model_name)
+    quality_partition = 0
+    if args.validate_existing_candidate:
+        previous_report = model_output_dir / f"{model_name}.quality.json"
+        try:
+            previous = json.loads(previous_report.read_text(encoding="utf-8"))
+            quality_partition = int(
+                previous.get("validation", {}).get("criteria", {}).get("sample_partition", 0)
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    quality = run_quality_gate(
+        args, config, model_output_dir, model_name, sample_partition=quality_partition,
+        report_dir=export_dir if args.validate_existing_candidate else None,
+    )
     retry_config = config
     retry_count = 0
     accumulated_positive: dict[str, Path] = {}
     accumulated_negative: dict[str, Path] = {}
-    while quality is not None and not quality["passed"] and retry_count < max(0, args.quality_retries):
+    while (
+        not args.validate_existing_candidate
+        and quality is not None
+        and not quality["passed"]
+        and retry_count < max(0, args.quality_retries)
+    ):
         missed_positive, triggered_negative = quality_misclassifications(quality)
         for path in missed_positive:
             accumulated_positive[str(path)] = path
@@ -1311,13 +1480,23 @@ def main() -> int:
         )
 
     if quality is not None and not quality["passed"]:
-        raise_quality_failure(quality, model_output_dir / f"{model_name}.quality.json")
+        failure_report_dir = export_dir if args.validate_existing_candidate else model_output_dir
+        raise_quality_failure(quality, failure_report_dir / f"{model_name}.quality.json")
     metadata["quality"] = quality
     metadata["quality_retries_used"] = retry_count
     if quality is not None:
         contract = quality["validation"]["streaming_contract"]
         metadata["recommended_threshold"] = float(contract["threshold"])
         metadata["recommended_patience"] = int(contract["patience"])
+        validation = quality["validation"]
+        metadata["quality_summary"] = {
+            "recall": float(validation["positive"]["rate"]),
+            "negative_rate": float(validation["negative"]["rate"]),
+            "positive_count": int(validation["positive"]["count"]),
+            "negative_count": int(validation["negative"]["count"]),
+            "sample_partition": int(validation["criteria"]["sample_partition"]),
+        }
+    metadata["validated_existing_candidate"] = bool(args.validate_existing_candidate)
     sync_artifacts(model_output_dir, export_dir, model_name, metadata)
     return 0
 

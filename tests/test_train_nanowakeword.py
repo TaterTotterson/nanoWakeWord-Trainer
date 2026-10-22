@@ -42,7 +42,7 @@ class TrainerDataTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in architecture_list()], ["cnn", "gru"])
         self.assertEqual(architecture_metadata("cnn")["layer_size"], 32)
         self.assertEqual(architecture_metadata("gru")["layer_size"], 128)
-        self.assertEqual(architecture_metadata("cnn")["loss_bias"], 0.65)
+        self.assertEqual(architecture_metadata("cnn")["loss_bias"], 0.70)
         self.assertEqual(architecture_metadata("gru")["loss_bias"], 0.75)
         self.assertEqual(architecture_metadata("gru")["n_blocks"], 1)
         with self.assertRaises(ValueError):
@@ -55,7 +55,9 @@ class TrainerDataTests(unittest.TestCase):
         self.assertEqual(args.quality_minimum_recall, 0.90)
         self.assertEqual(args.quality_target_recall, 0.95)
         self.assertEqual(args.quality_target_negative_rate, 0.05)
-        self.assertEqual(args.quality_maximum_patience, 4)
+        self.assertEqual(args.quality_maximum_patience, 5)
+        self.assertEqual(args.quality_max_clips, 500)
+        self.assertEqual(args.quality_retries, 2)
         self.assertEqual(args.positive_tts_dir, "")
 
     def test_shared_tts_replaces_nano_positive_generation_and_keeps_personal(self) -> None:
@@ -354,6 +356,40 @@ class TrainerDataTests(unittest.TestCase):
         self.assertEqual(source["include_partial_phrase"], 0.35)
         self.assertIs(type(source["include_input_words"]), float)
 
+    def test_custom_negative_phrases_are_normalized_and_never_include_target(self) -> None:
+        args = argparse.Namespace(
+            custom_negative_phrase=[" hey later ", "HEY TATER", "hey later", "okay tater"],
+            phrase="hey tater",
+        )
+        source = trainer.negative_text_source(args, 100)
+        self.assertEqual(source["type"], "from_list")
+        self.assertEqual(source["phrases"], ["hey later", "okay tater"])
+
+    def test_custom_negatives_augment_instead_of_replace_auto_adversarial(self) -> None:
+        args = argparse.Namespace(
+            custom_negative_phrase=["hey later", "okay tater"], phrase="hey tater"
+        )
+        sources = trainer.negative_text_sources(args, 100)
+        self.assertEqual([(name, count) for name, count, _recipe in sources], [("auto", 70), ("custom", 30)])
+        self.assertEqual(sources[0][2]["type"], "auto_adversarial")
+        self.assertEqual(sources[1][2]["type"], "from_list")
+
+    def test_uploaded_device_audio_gets_a_stable_unseen_holdout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            for index in range(10):
+                write_wav(source / f"clip-{index}.wav", np.zeros(160, dtype=np.int16))
+
+            training, holdout = trainer.partition_uploaded_audio(source, root / "output", "positive")
+
+            self.assertIsNotNone(holdout)
+            self.assertEqual(len(trainer.existing_wavs(training)), 8)
+            self.assertEqual(len(trainer.existing_wavs(holdout)), 2)
+            self.assertTrue(set(path.name for path in trainer.existing_wavs(training)).isdisjoint(
+                path.name for path in trainer.existing_wavs(holdout)
+            ))
+
     def test_zero_step_training_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_dir = Path(temporary) / "wake"
@@ -401,6 +437,62 @@ class TrainerDataTests(unittest.TestCase):
             )
             self.assertIn("quality_retry_positive_features", retry["feature_generation_manifest"])
             self.assertIn("quality_retry_negative_features", retry["feature_generation_manifest"])
+
+    def test_cnn_false_trigger_retry_raises_negative_loss_bias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            negative = root / "triggered.wav"
+            write_wav(negative, np.zeros(16000, dtype=np.int16))
+            config = {
+                "model_name": "wake", "model_type": "cnn", "LOSS_BIAS": 0.70,
+                "output_dir": str(root / "output"), "batch_composition": {},
+                "feature_manifest": {"targets": {}, "negatives": {}},
+                "feature_generation_manifest": {},
+            }
+            retry = trainer.make_quality_retry_config(
+                config, root / "output" / "wake", [], [negative]
+            )
+            self.assertEqual(retry["LOSS_BIAS"], 0.75)
+
+    def test_validate_existing_candidate_skips_training_and_exports_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "output"
+            model_dir = output_root / "wake"
+            model_path = model_dir / "model" / "wake.onnx"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"onnx")
+            (model_dir / "wake.yaml").write_text(
+                "model_name: wake\nmodel_type: cnn\nlayer_size: 32\nLOSS_BIAS: 0.7\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                phrase="wake", output_root=str(output_root), export_dir=str(root / "export"),
+                model_type="cnn", seed=42, steps=50000, validate_existing_candidate=True,
+                skip_quality_gate=False, quality_retries=2,
+            )
+            report = {
+                "passed": True,
+                "validation": {
+                    "passed": True, "failures": [],
+                    "streaming_contract": {"threshold": 0.99, "patience": 5},
+                    "criteria": {"sample_partition": 1},
+                    "positive": {"rate": 0.98, "count": 200},
+                    "negative": {"rate": 0.015, "count": 200},
+                },
+                "additional": [], "failures": [],
+            }
+            with (
+                mock.patch.object(trainer, "parse_args", return_value=args),
+                mock.patch.object(trainer, "provision_feature_bank"),
+                mock.patch.object(trainer, "run_training") as run_training,
+                mock.patch.object(trainer, "run_quality_gate", return_value=report),
+            ):
+                self.assertEqual(trainer.main(), 0)
+            run_training.assert_not_called()
+            metadata = json.loads((root / "export" / "wake.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["recommended_patience"], 5)
+            self.assertTrue(metadata["validated_existing_candidate"])
 
 
 if __name__ == "__main__":

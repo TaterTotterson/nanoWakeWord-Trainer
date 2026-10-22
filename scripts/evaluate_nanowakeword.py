@@ -52,10 +52,16 @@ def deterministic_sample(paths: list[Path], limit: int, partition: int = 0) -> l
     """Choose a stable, well-distributed partition without retry-set leakage."""
     if limit <= 0 or len(paths) <= limit:
         return paths
-    shuffled = sorted(
-        paths,
-        key=lambda path: hashlib.sha256(str(path).encode("utf-8")).digest(),
-    )
+    def stable_key(path: Path) -> bytes:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        # Do not let /data versus a host mount point change the holdout set.
+        # File name and size are stable identifiers for generated corpora.
+        return hashlib.sha256(f"{path.name}\0{size}".encode("utf-8")).digest()
+
+    shuffled = sorted(paths, key=stable_key)
     start = (max(0, int(partition)) * limit) % len(shuffled)
     rotated = shuffled[start:] + shuffled[:start]
     return rotated[:limit]
@@ -299,7 +305,7 @@ def calibrate_model(
     *,
     minimum_threshold: float = 0.90,
     minimum_patience: int = 2,
-    maximum_patience: int = 4,
+    maximum_patience: int = 5,
     max_clips_per_class: int = 200,
     sample_partition: int = 0,
     minimum_recall: float = 0.90,

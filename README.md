@@ -56,10 +56,13 @@ The normal training run uses the higher-quality NanoWakeWord recipe by default:
   false-trigger behavior; DNN and the unvalidated upstream architectures are
   intentionally not offered
 - a streaming quality gate that automatically calibrates thresholds from
-  `0.90` through `0.99` and two through four consecutive detections, then
+  `0.90` through `0.99` and two through five consecutive detections, then
   stores the selected policy with the model for Tater satellites
 
-If these Colab-style negative feature banks are present in `feature_banks/`, they are automatically included as extra negative sources:
+The large openWakeWord ACAV100M negative bank is independently provisioned,
+checksummed, and included even when openWakeWord is not selected. An existing
+OWW copy can be adopted without another 17 GB copy. These additional
+Colab-style banks are also included when present in `feature_banks/`:
 
 ```text
 AE29H_float32.npy
@@ -96,6 +99,14 @@ labeling room tone as the wake word, while leaving the original upload intact.
 Uploaded positive and negative clips receive extra augmentation and balanced
 sampling so a small set of real satellite recordings is not drowned out by the
 much larger synthetic corpus.
+When at least five uploaded positives and five uploaded negatives are
+available, a deterministic 20% device-audio holdout is kept out of training
+and used as a separate runtime-path quality check.
+
+Custom confusing phrases augment the automatic adversarial phrase generator;
+they no longer replace its broader negative vocabulary. CNN training starts
+with a stronger `0.70` negative-class loss bias and raises it to `0.75` during
+a corrective retry when false triggers remain.
 
 The generated ONNX model is tested from WAV audio through the same 80 ms
 streaming feature path used by Tater. A run that misses too many validation wake
@@ -115,10 +126,14 @@ model that fails on the user's actual satellite recordings.
 
 If the first runtime gate finds missed wake clips or false-trigger clips, the
 trainer automatically gives those failures a separate, balanced sampler and
-performs one corrective retraining pass. The retry is tested against a disjoint
+performs up to two corrective retraining passes. Each retry is tested against a disjoint
 validation partition so it cannot pass by memorizing the exact gate failures.
 No artifact is published unless that fresh partition passes; both quality
 reports remain with the training output.
+
+Use `--validate-existing-candidate` to run the expanded policy search against
+an existing ONNX candidate and export it when it passes, without repeating the
+full training run.
 
 For early real-room tests, add false wakes and normal room audio to `negative_samples/` before retraining. Pure synthetic data can pass training loss while still false-triggering on satellite microphone audio.
 

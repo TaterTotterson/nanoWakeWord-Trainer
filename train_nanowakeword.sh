@@ -38,7 +38,7 @@ Environment:
   NWW_FEATURE_BANK_DIR=/data/feature_banks
   NWW_POSITIVE_TTS_DIR=/data/generated_samples
   NWW_TORCH_DEVICE=auto|cpu|mps|cuda
-  NWW_FEATURE_DEVICE=cpu|gpu|auto       CPU matches satellite inference (default)
+  NWW_FEATURE_DEVICE=cpu|gpu|auto       ONNX feature extraction provider (default: cpu)
 EOF
   exit 1
 fi
@@ -66,9 +66,11 @@ else
 fi
 
 PY="$VENV_DIR/bin/python"
-TRAIN_DEPS_KEY="cpu"
+FEATURE_DEVICE="${NWW_FEATURE_DEVICE:-cpu}"
+ONNX_RUNTIME_VERSION="${NWW_ONNX_RUNTIME_VERSION:-1.22.1}"
+TRAIN_DEPS_KEY="cpu:${FEATURE_DEVICE}:ort-${ONNX_RUNTIME_VERSION}"
 if [[ -n "${NWW_TORCH_CUDA:-}" && "${NWW_FORCE_CPU:-0}" != "1" ]]; then
-  TRAIN_DEPS_KEY="${NWW_TORCH_VERSION:-2.6.0}+${NWW_TORCH_CUDA}"
+  TRAIN_DEPS_KEY="${NWW_TORCH_VERSION:-2.6.0}+${NWW_TORCH_CUDA}:${FEATURE_DEVICE}:ort-${ONNX_RUNTIME_VERSION}"
 fi
 
 mkdir -p "$OUTPUT_ROOT" "$EXPORT_DIR" "$POSITIVE_DIR" "$NEGATIVE_DIR" "$BACKGROUND_DIR" "$RIR_DIR" "$FEATURE_BANK_DIR" "$DATA_ROOT/logs"
@@ -128,14 +130,23 @@ if [[ ! -f "$VENV_DIR/.train_deps_installed" || "$(cat "$VENV_DIR/.train_deps_ke
   else
     "$PY" -m pip install -r requirements-train.txt
   fi
+  if [[ "$FEATURE_DEVICE" == "gpu" || ( "$FEATURE_DEVICE" == "auto" && -n "${NWW_TORCH_CUDA:-}" && "${NWW_FORCE_CPU:-0}" != "1" ) ]]; then
+    "$PY" -m pip uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
+    "$PY" -m pip install "onnxruntime-gpu==${ONNX_RUNTIME_VERSION}"
+  else
+    "$PY" -m pip uninstall -y onnxruntime-gpu >/dev/null 2>&1 || true
+    "$PY" -m pip install "onnxruntime==${ONNX_RUNTIME_VERSION}"
+  fi
   "$PY" - <<'PY'
 import importlib.metadata
+import onnxruntime
 import torch
 
 print(
     "NanoWakeWord dependencies: "
     f"nanowakeword={importlib.metadata.version('nanowakeword')}, "
-    f"torch={torch.__version__}, cuda={torch.version.cuda or 'none'}"
+    f"torch={torch.__version__}, cuda={torch.version.cuda or 'none'}, "
+    f"onnx_providers={onnxruntime.get_available_providers()}"
 )
 PY
   touch "$VENV_DIR/.train_deps_installed"

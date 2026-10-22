@@ -10,7 +10,7 @@ _ARCHITECTURE_ROWS: list[dict[str, Any]] = [
         "profile": "Higher Recall",
         "layer_size": 32,
         "n_blocks": 1,
-        "loss_bias": 0.65,
+        "loss_bias": 0.70,
         "status": "production",
         "status_label": "Streaming validated",
     },
