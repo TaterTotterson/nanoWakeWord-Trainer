@@ -1134,14 +1134,6 @@ def make_quality_retry_config(
     return retry
 
 
-def raise_quality_failure(report: dict[str, Any], report_path: Path) -> None:
-    reasons = "; ".join(report.get("failures") or ["unknown quality failure"])
-    raise SystemExit(
-        f"NanoWakeWord model failed streaming quality validation: {reasons}. "
-        f"The existing published model was left untouched. Report: {report_path}"
-    )
-
-
 def run_quality_gate(
     args: argparse.Namespace,
     config: dict[str, Any],
@@ -1351,7 +1343,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--validate-existing-candidate",
         action="store_true",
-        help="Re-run the streaming gate and export an existing ONNX candidate without retraining.",
+        help=(
+            "Re-run the streaming quality evaluation and export an existing ONNX candidate "
+            "without retraining."
+        ),
     )
     parser.add_argument("--skip-quality-gate", action="store_true")
     args = parser.parse_args()
@@ -1479,10 +1474,23 @@ def main() -> int:
             sample_partition=retry_count,
         )
 
-    if quality is not None and not quality["passed"]:
+    quality_evaluated = quality is not None
+    quality_passed = bool(quality is not None and quality.get("passed") is True)
+    if quality_evaluated and not quality_passed:
         failure_report_dir = export_dir if args.validate_existing_candidate else model_output_dir
-        raise_quality_failure(quality, failure_report_dir / f"{model_name}.quality.json")
+        reasons = "; ".join(quality.get("failures") or ["unknown quality warning"])
+        log(
+            "WARNING: NanoWakeWord model did not meet streaming quality targets after "
+            f"{retry_count} corrective retraining pass(es): {reasons}. Publishing the best "
+            "completed candidate with quality warnings so it can be tested. "
+            f"Report: {failure_report_dir / f'{model_name}.quality.json'}"
+        )
     metadata["quality"] = quality
+    metadata["quality_evaluated"] = quality_evaluated
+    metadata["quality_passed"] = quality_passed
+    metadata["quality_status"] = (
+        "passed" if quality_passed else "low_quality" if quality_evaluated else "not_evaluated"
+    )
     metadata["quality_retries_used"] = retry_count
     if quality is not None:
         contract = quality["validation"]["streaming_contract"]

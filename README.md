@@ -109,9 +109,10 @@ with a stronger `0.70` negative-class loss bias and raises it to `0.75` during
 a corrective retry when false triggers remain.
 
 The generated ONNX model is tested from WAV audio through the same 80 ms
-streaming feature path used by Tater. A run that misses too many validation wake
-words, triggers on too many validation negatives, or silently completes zero
-training steps is rejected; an existing published model is not overwritten.
+streaming feature path used by Tater. A run that silently completes zero
+training steps or fails to produce a valid ONNX artifact is rejected. Quality
+misses are reported as warnings and the best completed candidate is still
+published so it can be tested on real hardware.
 The default gate requires at least 90% wake-word recall and prefers a buffered
 policy with at least 95% recall and no more than a 5% trigger rate on the
 deliberately confusable synthetic negatives. The exact threshold and patience
@@ -128,12 +129,13 @@ If the first runtime gate finds missed wake clips or false-trigger clips, the
 trainer automatically gives those failures a separate, balanced sampler and
 performs up to two corrective retraining passes. Each retry is tested against a disjoint
 validation partition so it cannot pass by memorizing the exact gate failures.
-No artifact is published unless that fresh partition passes; both quality
-reports remain with the training output.
+The best valid artifact is published after those retries even when the fresh
+partition remains below target; the quality reports and explicit quality status
+remain with the training output.
 
 Use `--validate-existing-candidate` to run the expanded policy search against
-an existing ONNX candidate and export it when it passes, without repeating the
-full training run.
+an existing ONNX candidate and export it with its quality status, without
+repeating the full training run.
 
 For early real-room tests, add false wakes and normal room audio to `negative_samples/` before retraining. Pure synthetic data can pass training loss while still false-triggering on satellite microphone audio.
 

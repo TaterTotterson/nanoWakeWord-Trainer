@@ -493,6 +493,51 @@ class TrainerDataTests(unittest.TestCase):
             metadata = json.loads((root / "export" / "wake.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["recommended_patience"], 5)
             self.assertTrue(metadata["validated_existing_candidate"])
+            self.assertTrue(metadata["quality_evaluated"])
+            self.assertTrue(metadata["quality_passed"])
+            self.assertEqual(metadata["quality_status"], "passed")
+
+    def test_validate_existing_candidate_exports_with_quality_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "output"
+            model_dir = output_root / "wake"
+            model_path = model_dir / "model" / "wake.onnx"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"onnx")
+            (model_dir / "wake.yaml").write_text(
+                "model_name: wake\nmodel_type: cnn\nlayer_size: 32\nLOSS_BIAS: 0.7\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                phrase="wake", output_root=str(output_root), export_dir=str(root / "export"),
+                model_type="cnn", seed=42, steps=50000, validate_existing_candidate=True,
+                skip_quality_gate=False, quality_retries=2,
+            )
+            report = {
+                "passed": False,
+                "validation": {
+                    "passed": False, "failures": ["recall below target"],
+                    "streaming_contract": {"threshold": 0.90, "patience": 5},
+                    "criteria": {"sample_partition": 1},
+                    "positive": {"rate": 0.84, "count": 200},
+                    "negative": {"rate": 0.01, "count": 200},
+                },
+                "additional": [], "failures": ["recall below target"],
+            }
+            with (
+                mock.patch.object(trainer, "parse_args", return_value=args),
+                mock.patch.object(trainer, "provision_feature_bank"),
+                mock.patch.object(trainer, "run_training") as run_training,
+                mock.patch.object(trainer, "run_quality_gate", return_value=report),
+            ):
+                self.assertEqual(trainer.main(), 0)
+            run_training.assert_not_called()
+            metadata = json.loads((root / "export" / "wake.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["quality_evaluated"])
+            self.assertFalse(metadata["quality_passed"])
+            self.assertEqual(metadata["quality_status"], "low_quality")
+            self.assertEqual(metadata["quality"]["failures"], ["recall below target"])
 
 
 if __name__ == "__main__":

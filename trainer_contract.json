@@ -6,6 +6,7 @@
     "multiple-rir-dirs",
     "shared-negative-feature-bank",
     "quality-patience-5",
-    "validate-existing-candidate"
+    "validate-existing-candidate",
+    "advisory-quality-publication"
   ]
 }
