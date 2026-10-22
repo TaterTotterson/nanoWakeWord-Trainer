@@ -21,6 +21,7 @@ class TrainingDependencyTests(unittest.TestCase):
         self.assertIn('NWW_TORCH_VERSION:-2.8.0', launcher)
         self.assertIn('requirements-train.torch-constraints.txt', launcher)
         self.assertIn('pip install -c "$TORCH_CONSTRAINTS"', launcher)
+        self.assertIn('NWW_ONNX_RUNTIME_VERSION:-1.22.0', launcher)
 
     def test_feature_provider_defaults_to_runtime_compatible_cpu(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
