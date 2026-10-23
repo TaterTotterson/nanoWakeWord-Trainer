@@ -38,6 +38,74 @@ def write_wav(path: Path, audio: np.ndarray, sample_rate: int = 16000) -> None:
 
 
 class TrainerDataTests(unittest.TestCase):
+    def test_runtime_feature_failure_is_not_retried_or_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output" / "wake" / "features" / "positive.npy"
+            config_path = root / "wake.yaml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        f"output_dir: {root / 'output'}",
+                        "model_name: wake",
+                        "transform_clips: true",
+                        "train_model: false",
+                        "feature_generation_manifest:",
+                        "  positive:",
+                        "    input_audio_dirs: []",
+                        "    output_filename: positive.npy",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def failed_transform(*_args, **_kwargs):
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"partial")
+                return mock.Mock(returncode=1)
+
+            with mock.patch.object(
+                trainer.subprocess, "run", side_effect=failed_transform
+            ) as run:
+                with self.assertRaises(SystemExit):
+                    trainer.run_training(config_path)
+
+            self.assertEqual(run.call_count, 1)
+            self.assertIn("--config", run.call_args.args[0])
+            self.assertNotIn("-c", run.call_args.args[0])
+            self.assertFalse(output.exists())
+
+    def test_valid_feature_cache_skips_transform_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output" / "wake" / "features" / "positive.npy"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"valid")
+            config_path = root / "wake.yaml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        f"output_dir: {root / 'output'}",
+                        "model_name: wake",
+                        "transform_clips: true",
+                        "train_model: false",
+                        "feature_generation_manifest:",
+                        "  positive:",
+                        "    input_audio_dirs: []",
+                        "    output_filename: positive.npy",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(trainer.subprocess, "run") as run:
+                trainer.run_training(config_path)
+
+            run.assert_not_called()
+            self.assertEqual(output.read_bytes(), b"valid")
+
     def test_supported_architecture_defaults(self) -> None:
         self.assertEqual([item["id"] for item in architecture_list()], ["cnn", "gru"])
         self.assertEqual(architecture_metadata("cnn")["layer_size"], 32)

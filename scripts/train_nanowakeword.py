@@ -931,21 +931,28 @@ def run_nanowakeword(config_path: Path, stage_flags: list[str]) -> None:
         config = yaml.safe_load(handle) or {}
     if bool(config.get("overwrite")):
         stage_flags.append("--overwrite")
-    candidates = [
-        [*nanowakeword_cmd(), "-c", str(config_path), *stage_flags],
-        [*nanowakeword_cmd(), "--config", str(config_path), *stage_flags],
-    ]
-    last_code = 1
-    for idx, cmd in enumerate(candidates, start=1):
-        log("")
-        log("$ " + " ".join(cmd))
-        result = subprocess.run(cmd, cwd=str(ROOT_DIR), env=os.environ.copy())
-        if result.returncode == 0:
-            return
-        last_code = result.returncode
-        if idx < len(candidates):
-            log(f"Command form exited {result.returncode}; trying the next NanoWakeWord CLI form.")
-    raise SystemExit(last_code)
+    # NanoWakeWord is pinned, so use its known long-form option. Retrying a
+    # different CLI spelling after *any* non-zero exit used to hide real
+    # feature-generation tracebacks: the retry could see a partially-created
+    # .npy file, skip it, and continue into model training with invalid data.
+    cmd = [*nanowakeword_cmd(), "--config", str(config_path), *stage_flags]
+    log("")
+    log("$ " + " ".join(cmd))
+    result = subprocess.run(cmd, cwd=str(ROOT_DIR), env=os.environ.copy())
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+
+def feature_job_output(config: dict[str, Any], recipe: dict[str, Any]) -> Path:
+    filename = Path(str(recipe.get("output_filename") or "")).name
+    if not filename:
+        raise ValueError("NanoWakeWord feature job is missing output_filename")
+    return (
+        Path(config["output_dir"])
+        / str(config["model_name"])
+        / "features"
+        / filename
+    )
 
 
 def write_stage_config(
@@ -984,16 +991,35 @@ def run_training(config_path: Path) -> None:
     feature_jobs = config.get("feature_generation_manifest") or {}
     if config.get("transform_clips") and feature_jobs:
         for job_name, recipe in feature_jobs.items():
-            run_nanowakeword(
-                write_stage_config(
-                    config,
-                    config_path,
-                    f"features.{safe_name(str(job_name))}",
-                    transform_clips=True,
-                    feature_generation_manifest={job_name: recipe},
-                ),
-                ["-t"],
-            )
+            output_path = feature_job_output(config, recipe)
+            if output_path.exists() and not bool(config.get("overwrite")):
+                log(f"Reusing validated feature cache: {output_path}")
+                continue
+            if output_path.exists() or output_path.is_symlink():
+                output_path.unlink()
+            try:
+                run_nanowakeword(
+                    write_stage_config(
+                        config,
+                        config_path,
+                        f"features.{safe_name(str(job_name))}",
+                        transform_clips=True,
+                        feature_generation_manifest={job_name: recipe},
+                    ),
+                    ["-t"],
+                )
+            except BaseException:
+                # A failed transform may leave a truncated .npy behind. Never
+                # let a later run mistake it for a valid cache.
+                if output_path.exists() or output_path.is_symlink():
+                    output_path.unlink()
+                raise
+            if not output_path.is_file() or output_path.stat().st_size == 0:
+                if output_path.exists():
+                    output_path.unlink()
+                raise SystemExit(
+                    f"NanoWakeWord feature generation produced no usable output: {output_path}"
+                )
 
     if config.get("train_model"):
         run_nanowakeword(
